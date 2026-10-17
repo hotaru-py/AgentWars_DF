@@ -5,6 +5,8 @@ learner are deterministic code, so the LLM proposes and narrates but never grade
 itself or writes the policy.
 """
 
+import os
+
 from google.adk.agents import Agent
 from google.adk.models import Gemini
 from google.genai import types
@@ -12,7 +14,10 @@ from google.genai import types
 from .tools import (apply_disruption, get_policy, get_world_state, notify_customers, plan_routes,
                     replan_routes, reset, run_day)
 
-MODEL = "gemini-3.8-flash"
+# Set GEMINI_MODEL in dispatch_agent/.env to switch models without a code change. Free-tier
+# quota is per project AND per model (about 20 requests/day each), so when one model's daily
+# quota runs out, another model still has its own. gemini-flash-latest shares 3.8's quota.
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Free tier is 5 requests/min per model; back off on 429/5xx instead of crashing.
 LLM = Gemini(
@@ -28,10 +33,14 @@ INSTRUCTION = """You are an autonomous dispatch agent for a Chennai delivery fle
 Rules:
 - Never invent routes, times or metrics. Every number must come from a tool result.
 - "Plan routes" / start of day: call plan_routes.
-- On any disruption (flood / flooding on OMR -> "flood"; traffic jam / T. Nagar -> "traffic";
-  van breakdown -> "breakdown"):
+- On any disruption, anywhere in Chennai:
   1. If there is no current plan, call plan_routes first.
-  2. apply_disruption(scenario)
+  2. apply_disruption(kind, location, description): kind is "flood" (flooding, waterlogging,
+     heavy rain), "traffic" (jam, VIP/CM convoy, accident, protest, road closure) or
+     "breakdown" (pass vehicle_id). location = the area or road exactly as the user said it
+     (e.g. "Tambaram", "GST Road"); description = the cause in a few words (e.g. "CM convoy").
+     If the tool says the location is unknown and you know roughly where it is in Chennai,
+     call again with lat and lng. If no orders are in the zone, still re-plan and say so.
   3. replan_routes()
   4. notify_customers once, with one message per affected order: polite, under 40 words,
      includes the new ETA as a clock time (new_eta_clock, e.g. "11:39 AM") and the reason.
