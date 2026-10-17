@@ -7,7 +7,7 @@ them in here. That way pulls never conflict and nothing gets overwritten. See
 [WORKBOARD.md](WORKBOARD.md). The original long spec is
 [1230-spec.md](1230-spec.md); where they disagree, **this file and WORKBOARD.md win**.
 
-**Merged through:** system-1: 2026-10-17 12:50 · system-2: none · system-3: none
+**Merged through:** system-1: 2026-10-17 13:55 · system-2: 2026-10-17 13:35 · system-3: 2026-10-17 13:40
 
 ## The build in one paragraph
 
@@ -36,6 +36,8 @@ policy, so ETA error drops on every repeat run. No human approves anything.
 | D12 | No Jev, no reflection loop, no CSV upload, no natural-language order add | Out of time |
 | D13 | Keep `logistics_agent/` untouched as the fallback demo | Already works live |
 | D14 | Claude instances do **not** commit or push. Humans handle git | Team rule |
+| D15 | Rollback triggers on ETA error rising twice, not on plan score | Plan score falls naturally as predictions get realistic (found by system-1 and system-3) |
+| D16 | One disruption at a time; reset between scenarios | Stacking disruptions would break the simulator's learning signal |
 
 ## Environment and gotchas
 
@@ -52,10 +54,10 @@ policy, so ETA error drops on every repeat run. No human approves anything.
 
 | Track | Owner/system | Status |
 |---|---|---|
-| A Routing | System 2 | not started |
-| B Feedback | System 1 (with C) | **done**: 12 tests pass |
-| C Agent + tools | System 1 (integrator) | done; live-tested, awaiting A merge |
-| D Map + demo | System 3 | not started |
+| A Routing | System 2 | **done**: `routing.py` + 13 tests, merged and in use |
+| B Feedback | System 1 (with C) | **done**: 12 tests; rollback now on ETA error |
+| C Agent + tools | System 1 (integrator) | **done**: integrated with A + D, live-tested, 8 tool tests |
+| D Map + demo | System 3 | **done**: `map.html` + README; verified on real state, 8/8 checks |
 
 ## Log
 
@@ -63,3 +65,20 @@ policy, so ETA error drops on every repeat run. No human approves anything.
 - 2026-10-17: 3 systems. System 1 = B + C (integrator), System 2 = A, System 3 = D. Added shared `dispatch_agent/geo.py` (distances + `edge_disrupted`); A and B must use it. `simulate_day` now takes `base_graph` (see WORKBOARD).
 - 2026-10-17: Track A contract gained `retime(plan, matrix)` (same stops, recomputed ETAs) for C's do-nothing baseline.
 - 2026-10-17: Track B done (`feedback.py`, 12 tests). kpis() also returns late_orders, total_min, total_km for C's before/after cards. Learner verified: flood 4.0 -> 4.5 -> 4.75 -> 4.875, ETA error falls each run.
+- [12:55] system-1: Context protocol added: per-system notes in specs/context/, union merge in .gitattributes, CLAUDE.md rules, /sync-context command.
+- [13:05] system-1: Track C written: `tools.py` (8 tools), `agent.py` (gemini-3.8-flash + retry), `_routing_fallback.py` stand-in until A lands.
+- [13:05] system-1: **CONTRACT** graph[a][b] and graph[b][a] must be separate dicts (a shared dict gets multiplied twice).
+- [13:05] system-1: **CONTRACT** `simulate_day` also returns `disrupted_orders`; `learn` rolls back when ETA error rises twice in a row; NOISE +-3%.
+- [13:05] system-1: Offline flow verified: ETA error 15.8% -> 9.8% -> 4.2%, factor 4.0 -> 4.43 -> 4.70, ~140-160 min saved.
+- [13:12] system-1: Live adk run OK; added `new_eta_clock` (9:00 AM shift start) to replan_routes.
+- [13:20] system-2: Track A done: `routing.py` + 13 tests. Plans include a route for every active van (empty stops allowed), none for broken vans; duration_min = last ETA (no return leg).
+- [13:20] system-3: Track D done: `map.html` (Leaflet 1.9.4, OSM tiles) + README dispatch section. Map is a live map plus verification board (workflow stepper, acceptance checks, critic, vans, notifications, learning chart, tool timeline).
+- [13:20] system-3: **CONTRACT** (additive, optional) state.json may carry `critic`, `kpis`, `baseline_plan`, `before_after`, `affected_orders`, `last_run`, `events`; panels hide when missing.
+- [13:20] system-3: Flagged the rollback-on-plan-score risk (4.27 -> 4.59 -> back to 4.27). Fixed by system-1 (D15).
+- [13:35] system-2: **CONTRACT** ack: separate dicts per direction already true in routing.py, covered by a test.
+- [13:40] system-3: Integration check on merged main: 3 floods 15.8% -> 9.8% -> 4.2%, no rollback, 5/5 scorable checks pass; asked system-1 to write the optional state fields.
+- [13:50] system-1: Integration check: tools use real routing.py, 53 tests pass. Breakdown 3 late -> 0; traffic 17 min saved.
+- [13:50] system-1: Wrote all of system-3's optional state fields (cleared on reset); added tests/test_dispatch_tools.py.
+- [13:50] system-1: run_day without a disruption now errors instead of writing a junk history entry.
+- [13:50] system-1: Known limit: one disruption at a time (D16).
+- [13:55] system-1: Live run on merged code OK. Agent no longer pads plan-only replies; run_day returns `eta_error_pct`. Map verified in headless Chrome: 8/8 checks.

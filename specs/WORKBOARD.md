@@ -54,6 +54,7 @@ multiplier comes from the policy; the *true* one lives only in `feedback.TRUTH`.
 
 ```python
 Graph = dict[str, dict[str, dict]]   # graph[a][b] = {"min": float, "km": float}, undirected
+                                     # graph[a][b] and graph[b][a] are SEPARATE dicts (never shared)
 
 def build_graph(k: int = 4) -> Graph
     # nodes = DEPOT + ORDERS; connect each node to its k nearest (haversine*ROAD_FACTOR km,
@@ -117,6 +118,7 @@ def simulate_day(plan: dict, base_graph: Graph, disruption: dict | None, run: in
     # walks each route.path leg by leg: base min from base_graph[a][b]["min"]; if
     # geo.edge_disrupted(a, b, disruption) multiply by TRUTH[kind] * seeded noise for this run ->
     # {"realized_eta": {order_id: min},
+    #  "disrupted_orders": [order ids whose trip crossed the disruption],  (C learns on these only)
     #  "observed_ratio": float}   # realized min / undisrupted min, over the disrupted legs only
     #                             # (what a real fleet would measure; never expose TRUTH itself)
 
@@ -125,7 +127,7 @@ def learn(policy: dict, kind: str, predicted_eta: dict, realized_eta: dict,
     # eta_error = mean(|pred - real|) / mean(real)
     # new = 0.5*old + 0.5*observed_ratio, clamped to +-25% of old  (4.0 -> ~4.5 -> ~4.75)
     # returns {"policy": new_policy (version+1, history appended), "changes": {...}, "eta_error": float}
-    # rollback: if overall dropped two runs in a row, return the previous policy instead
+    # rollback: if ETA error ROSE two runs in a row (same kind), return the previous policy instead
 
 def load_policy() -> dict / def save_policy(policy: dict) -> None
     # dispatch_agent/out/policy.json; save atomically (write tmp, then os.replace)
@@ -164,6 +166,11 @@ polyline per van through `route.path` node coordinates, and the disruption as a
 translucent red circle. Serve it with `python -m http.server 8001 -d dispatch_agent`.
 
 `out/state.json` shape: `{"depot", "orders", "vehicles", "plan", "disruption", "policy": {"version", "delay_factor", "history"}, "notifications": [...]}`
+
+Optional fields (written by tools.py; the map hides a panel while its field is missing):
+`critic` (critic() return), `kpis` (applied plan), `baseline_plan` (do-nothing plan), `before_after`
+(`{before, after}` with total_min, total_km, late_orders), `affected_orders` (ids), `last_run`
+(`{eta_error, changes}`), `events` (`[{ts, tool, summary}]`, cleared on reset).
 
 ## Demo script (2 minutes)
 

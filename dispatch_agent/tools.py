@@ -8,6 +8,7 @@ their own state. ADK builds each tool's schema from its type hints and docstring
 import copy
 import json
 import os
+import time
 
 from . import feedback, geo, routing, seed
 
@@ -37,7 +38,10 @@ def _fresh_state(policy: dict | None = None) -> None:
     S.clear()
     S.update(base_graph=graph, matrix=R.cost_matrix(graph), vehicles=copy.deepcopy(seed.VEHICLES),
              disruption=None, plan=None, pre_disruption_plan=None, notifications=[],
-             policy=policy or feedback.load_policy())
+             policy=policy or feedback.load_policy(),
+             # optional fields for map.html (System 3 contract); panels hide while None
+             critic=None, kpis=None, baseline_plan=None, before_after=None, affected_orders=None,
+             last_run=None, events=[])
 
 
 def _write_state() -> None:
@@ -45,7 +49,9 @@ def _write_state() -> None:
     p = S["policy"]
     snapshot = {"depot": seed.DEPOT, "orders": seed.ORDERS, "vehicles": S["vehicles"], "plan": S["plan"],
                 "disruption": S["disruption"], "notifications": S["notifications"],
-                "policy": {"version": p["version"], "delay_factor": p["delay_factor"], "history": p["history"]}}
+                "policy": {"version": p["version"], "delay_factor": p["delay_factor"], "history": p["history"]},
+                **{k: S[k] for k in ("critic", "kpis", "baseline_plan", "before_after", "affected_orders",
+                                     "last_run", "events")}}
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(snapshot, f, indent=2)
@@ -54,6 +60,10 @@ def _write_state() -> None:
 
 def _err(message: str) -> dict:
     return {"status": "error", "message": message}
+
+
+def _event(tool: str, summary: str) -> None:
+    S["events"].append({"ts": time.time(), "tool": tool, "summary": summary})
 
 
 def _summary(plan: dict) -> list[dict]:
@@ -104,8 +114,10 @@ def plan_routes() -> dict:
     if review["verdict"] != "apply":
         return _err("No valid plan: every candidate left orders unassigned.")
     S["plan"] = next(p for p in plans if p["id"] == review["best_id"])
-    _write_state()
     k = feedback.kpis(S["plan"], seed.ORDERS, S["matrix"])
+    S.update(critic=review, kpis=k, baseline_plan=None, before_after=None, affected_orders=None)
+    _event("plan_routes", f"critic applied {S['plan']['params']['name']} ({k['overall']:.2f}), {k['total_min']} min")
+    _write_state()
     return {"status": "ok", "verdict": "apply", "chosen": S["plan"]["params"]["name"],
             "candidates": _candidates(review["table"]), "routes": _summary(S["plan"]), "metrics": _metrics(k)}
 
@@ -137,6 +149,7 @@ def apply_disruption(scenario: str) -> dict:
     else:
         S["matrix"] = R.cost_matrix(R.apply_disruption(S["base_graph"], d))
         zone = [o["id"] for o in seed.ORDERS if geo.edge_disrupted(o["id"], o["id"], d)]
+    _event("apply_disruption", f"{d['label']}, predicted x{d['multiplier']}")
     _write_state()
     return {"status": "ok", "label": d["label"], "kind": d["kind"],
             "predicted_multiplier": d["multiplier"], "orders_in_zone": zone}
@@ -177,6 +190,11 @@ def replan_routes() -> dict:
                 for o in seed.ORDERS
                 if o["id"] in after_eta and (abs(after_eta[o["id"]] - before_eta.get(o["id"], 0)) > AFFECTED_MIN
                                              or before_van.get(o["id"]) != after_van.get(o["id"]))]
+    S.update(critic=review, kpis=after_k, baseline_plan=do_nothing,
+             before_after={"before": _metrics(base_k), "after": _metrics(after_k)},
+             affected_orders=[a["order_id"] for a in affected])
+    _event("replan_routes", f"{review['verdict']}: {base_k['total_min']} -> {after_k['total_min']} min, "
+                            f"{len(affected)} affected")
     _write_state()
     return {"status": "ok", "verdict": review["verdict"], "chosen": S["plan"].get("params", {}).get("name", "do-nothing"),
             "do_nothing": _metrics(base_k), "after": _metrics(after_k),
@@ -212,6 +230,7 @@ def notify_customers(order_ids: list[str], messages: list[str]) -> dict:
             S["notifications"].append({"order_id": oid, "customer": known[oid]["customer"],
                                        "phone": known[oid]["phone"], "message": msg, "sent": True})
             sent += 1
+    _event("notify_customers", f"{sent} sent, {len(rejected)} rejected")
     _write_state()
     return {"status": "ok", "sent": sent, "rejected": rejected}
 
@@ -222,13 +241,16 @@ def run_day() -> dict:
     customers are notified.
 
     Returns:
-        {"status": "ok", "eta_error", "delay_factor_change": {kind: [old, new]},
+        {"status": "ok", "eta_error" (fraction), "eta_error_pct" (e.g. "15.8%"),
+        "delay_factor_change": {kind: [old, new]},
         "rolled_back", "policy_version", "history"}.
     """
     if not S["plan"]:
         return _err("No current plan. Call plan_routes first.")
     d = S["disruption"]
-    kind = d["kind"] if d else "none"
+    if not d:
+        return _err("No disruption to learn from. run_day only runs after apply_disruption and replan_routes.")
+    kind = d["kind"]
     run = len(S["policy"]["history"]) + 1
     sim = feedback.simulate_day(S["plan"], S["base_graph"], d, run)
     overall = feedback.kpis(S["plan"], seed.ORDERS, S["matrix"])["overall"]
@@ -237,9 +259,13 @@ def run_day() -> dict:
     realized = {o: e for o, e in sim["realized_eta"].items() if o in touched}
     out = feedback.learn(S["policy"], kind, predicted, realized, sim["observed_ratio"], overall)
     S["policy"] = out["policy"]
+    S["last_run"] = {"eta_error": out["eta_error"], "changes": out["changes"]}
     feedback.save_policy(S["policy"])
+    _event("run_day", f"ETA error {out['eta_error']:.1%}, {kind} x{out['changes']['delay_factor'][kind][0]} "
+                      f"-> x{out['changes']['delay_factor'][kind][1]}")
     _write_state()
-    return {"status": "ok", "eta_error": out["eta_error"], "delay_factor_change": out["changes"]["delay_factor"],
+    return {"status": "ok", "eta_error": out["eta_error"], "eta_error_pct": f"{out['eta_error']:.1%}",
+            "delay_factor_change": out["changes"]["delay_factor"],
             "rolled_back": out["changes"]["rolled_back"], "policy_version": S["policy"]["version"],
             "history": [{k: h[k] for k in ("run", "kind", "eta_error", "delay_factor")} for h in S["policy"]["history"]]}
 

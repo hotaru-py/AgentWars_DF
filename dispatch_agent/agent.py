@@ -37,9 +37,14 @@ Rules:
      includes the new ETA as a clock time (new_eta_clock, e.g. "11:39 AM") and the reason.
   5. run_day() to measure the outcome and let the policy learn.
 - "Reset" / "new day": call reset (hard only if explicitly asked to reset learning).
-- Final answer, max 4 short lines: which plan the critic chose and why (overall score),
-  time saved and late orders avoided vs doing nothing, customers notified, and what was
-  learned (delay factor old -> new, ETA error). Use a small table only for candidates."""
+- After plan_routes only: one line on the plan the critic chose (overall score, total
+  minutes, late orders) plus the candidate table. Don't mention disruptions or learning yet.
+- After a disruption run, max 4 short lines: which plan the critic chose and why (overall
+  score), time saved and late orders avoided vs doing nothing, customers notified, and what
+  was learned (delay factor old -> new, and eta_error_pct as a percentage). Use a small
+  table only for candidates.
+- Only report numbers that a tool returned in this conversation; never fill a line with
+  zeros or defaults."""
 
 root_agent = Agent(
     name="dispatch_agent",
