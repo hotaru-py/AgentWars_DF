@@ -73,7 +73,7 @@ def test_simulate_day_slows_only_disrupted_legs():
     r = feedback.simulate_day(plan, _graph(), flood, run=1)
     assert r["realized_eta"]["O1"] == 14.4                     # T. Nagar leg is outside the flood
     assert r["realized_eta"]["O6"] > 36.0 * 4.4                # OMR leg at ~5x (+-10%)
-    assert 4.5 <= r["observed_ratio"] <= 5.5
+    assert 4.8 <= r["observed_ratio"] <= 5.2
 
 
 def test_simulate_day_is_deterministic_per_run_and_hides_truth():
@@ -81,7 +81,8 @@ def test_simulate_day_is_deterministic_per_run_and_hides_truth():
     a = feedback.simulate_day(_plan("p", 14.4, 36.0), _graph(), flood, run=2)
     b = feedback.simulate_day(_plan("p", 14.4, 36.0), _graph(), flood, run=2)
     assert a == b
-    assert set(a) == {"realized_eta", "observed_ratio"}
+    assert set(a) == {"realized_eta", "disrupted_orders", "observed_ratio"}
+    assert a["disrupted_orders"] == ["O6"]
 
 
 def test_simulate_day_without_disruption():
@@ -111,12 +112,12 @@ def test_learn_step_is_capped():
     assert out["policy"]["delay_factor"]["flood"] == 5.0       # 4.0 * 1.25
 
 
-def test_learn_rolls_back_after_two_drops():
+def test_learn_rolls_back_after_eta_error_rises_twice():
     policy = copy.deepcopy(feedback.DEFAULT_POLICY)
-    for overall in (0.80, 0.75):
-        policy = feedback.learn(policy, "flood", {"O6": 1}, {"O6": 1}, 5.0, overall)["policy"]
+    for err_pred in (101, 110):                                 # ETA error 1% then 10%
+        policy = feedback.learn(policy, "flood", {"O6": err_pred}, {"O6": 100}, 5.0, 0.7)["policy"]
     before_last = copy.deepcopy(policy["previous"]["delay_factor"])
-    out = feedback.learn(policy, "flood", {"O6": 1}, {"O6": 1}, 5.0, 0.70)
+    out = feedback.learn(policy, "flood", {"O6": 130}, {"O6": 100}, 5.0, 0.7)   # 30%
     assert out["changes"]["rolled_back"] is True
     assert out["policy"]["delay_factor"] == before_last
 
