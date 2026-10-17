@@ -16,7 +16,7 @@ OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 POLICY_PATH = os.path.join(OUT_DIR, "policy.json")
 
 TRUTH = {"flood": 5.0, "traffic": 3.0, "breakdown": 1.0}  # hidden from the agent
-NOISE = 0.10
+NOISE = 0.03
 SEED = 42
 
 KPI_WEIGHTS = {"on_time": 0.30, "efficiency": 0.20, "cycle": 0.15, "balance": 0.15, "resilience": 0.20}
@@ -112,9 +112,9 @@ def simulate_day(plan: dict, base_graph: dict, disruption: dict | None, run: int
     the hidden TRUE slowdown. Returns realized ETAs and the slowdown a fleet would
     observe on the disrupted legs (never TRUTH itself)."""
     mult = _true_multiplier(disruption["kind"], run) if disruption else 1.0
-    realized, base_dis, real_dis = {}, 0.0, 0.0
+    realized, disrupted_orders, base_dis, real_dis = {}, [], 0.0, 0.0
     for r in plan["routes"]:
-        stops, ptr, t = r["stops"], 0, 0.0
+        stops, ptr, t, hit = r["stops"], 0, 0.0, False
         path = r["path"]
         for a, b in zip(path, path[1:]):
             edge = base_graph.get(a, {}).get(b)
@@ -123,11 +123,15 @@ def simulate_day(plan: dict, base_graph: dict, disruption: dict | None, run: int
                 base_dis += leg
                 leg *= mult
                 real_dis += leg
+                hit = True
             t += leg
             if ptr < len(stops) and b == stops[ptr]:
                 realized[b] = round(t, 1)
+                if hit:
+                    disrupted_orders.append(b)
                 ptr += 1
     return {"realized_eta": realized,
+            "disrupted_orders": disrupted_orders,  # orders whose trip crossed the disruption
             "observed_ratio": round(real_dis / base_dis, 3) if base_dis else None}
 
 
@@ -135,8 +139,10 @@ def simulate_day(plan: dict, base_graph: dict, disruption: dict | None, run: int
 def learn(policy: dict, kind: str, predicted_eta: dict, realized_eta: dict,
           observed_ratio: float | None, overall: float) -> dict:
     """Update the policy from one run: nudge delay_factor[kind] halfway toward the
-    observed slowdown (capped at +-25%), and roll back if the overall score has
-    dropped two runs in a row."""
+    observed slowdown (capped at +-25%), and roll back if ETA error has risen two
+    runs in a row (prediction quality is what the learner controls; the plan score
+    naturally falls as predictions get more realistic). Pass only the ETAs of
+    orders the disruption touched, so the error isn't diluted by unaffected ones."""
     common = [o for o in realized_eta if o in predicted_eta]
     mean_real = sum(realized_eta[o] for o in common) / len(common) if common else 0.0
     eta_error = (sum(abs(predicted_eta[o] - realized_eta[o]) for o in common) / len(common) / mean_real
@@ -147,8 +153,8 @@ def learn(policy: dict, kind: str, predicted_eta: dict, realized_eta: dict,
     history = new.setdefault("history", [])
     old = policy["delay_factor"].get(kind, 1.0)
 
-    overalls = [h["overall"] for h in history] + [overall]
-    rolled_back = (len(overalls) >= 3 and overalls[-1] < overalls[-2] < overalls[-3]
+    errors = [h["eta_error"] for h in history if h["kind"] == kind] + [eta_error]
+    rolled_back = (len(errors) >= 3 and errors[-1] > errors[-2] > errors[-3]
                    and "previous" in policy)
     if rolled_back:
         new["delay_factor"] = copy.deepcopy(policy["previous"]["delay_factor"])

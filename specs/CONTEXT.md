@@ -54,7 +54,7 @@ policy, so ETA error drops on every repeat run. No human approves anything.
 |---|---|---|
 | A Routing | System 2 | not started |
 | B Feedback | System 1 (with C) | **done**: 12 tests pass |
-| C Agent + tools | System 1 (integrator) | not started |
+| C Agent + tools | System 1 (integrator) | done; live-tested, awaiting A merge |
 | D Map + demo | System 3 | not started |
 
 ## Log
