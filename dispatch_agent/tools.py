@@ -10,7 +10,7 @@ import json
 import os
 import time
 
-from . import feedback, geo, routing, seed
+from . import feedback, geo, places, routing, seed
 
 try:  # use Track A's routing once it's merged; until then, Track C's stand-in
     routing.build_graph()
@@ -122,36 +122,93 @@ def plan_routes() -> dict:
             "candidates": _candidates(review["table"]), "routes": _summary(S["plan"]), "metrics": _metrics(k)}
 
 
-def apply_disruption(scenario: str) -> dict:
-    """Register a disruption so the road network (or fleet) reflects it. Uses the
-    learned delay factor from the policy as the predicted slowdown.
+_KIND_WORDS = {
+    "flood": ("flood", "flooding", "waterlogging", "waterlogged", "rain", "inundation", "cyclone"),
+    "traffic": ("traffic", "jam", "congestion", "convoy", "accident", "protest", "rally", "procession",
+                "roadblock", "closure", "closed", "diversion", "vip", "construction", "metro work"),
+    "breakdown": ("breakdown", "broke", "broken", "puncture", "engine", "van down", "vehicle down"),
+}
+_KIND_LABEL = {"flood": "Flooding", "traffic": "Traffic jam"}
+_DEFAULT_RADIUS = {"flood": 5.0, "traffic": 2.5}
+
+
+def _kind_of(text: str) -> str | None:
+    t = (text or "").strip().lower()
+    for kind, words in _KIND_WORDS.items():
+        if t == kind or any(w in t for w in words):
+            return kind
+    return None
+
+
+def apply_disruption(kind: str, location: str = "", description: str = "", radius_km: float = 0.0,
+                     vehicle_id: str = "", lat: float = 0.0, lng: float = 0.0) -> dict:
+    """Register a disruption anywhere in Chennai so the road network (or fleet)
+    reflects it. Uses the learned delay factor for that kind as the predicted slowdown.
 
     Args:
-        scenario: One of "flood" (flooding on OMR), "traffic" (jam in T. Nagar)
-            or "breakdown" (van V2 broke down).
+        kind: "flood" (flooding, waterlogging, heavy rain), "traffic" (jam, VIP or CM
+            convoy, accident, protest, road closure, diversion) or "breakdown" (a van
+            is out of service).
+        location: Where it is, as the user said it: a Chennai area or road such as
+            "Tambaram", "Velachery", "OMR", "GST Road", "Kathipara". Not needed for
+            a breakdown.
+        description: Short cause in the user's words, e.g. "CM convoy". Optional.
+        radius_km: Size of the affected zone in km. 0 = default (flood 5, traffic 2.5).
+        vehicle_id: For a breakdown: the van that is down, "V1", "V2" or "V3".
+        lat: Only if the location is not a known area: its latitude (Chennai, 12.75-13.25).
+        lng: Only if the location is not a known area: its longitude (Chennai, 79.95-80.35).
 
     Returns:
-        {"status": "ok", "label", "kind", "predicted_multiplier", "orders_in_zone"}.
+        {"status": "ok", "label", "kind", "location", "center", "radius_km",
+        "predicted_multiplier", "orders_in_zone"}.
     """
-    key = (scenario or "").strip().lower()
-    if key not in seed.SCENARIOS:
-        return _err(f"Unknown scenario '{scenario}'. Valid: {', '.join(seed.SCENARIOS)}.")
+    k = _kind_of(kind) or _kind_of(description)
+    if not k:
+        return _err(f"Unknown disruption kind '{kind}'. Valid: flood, traffic, breakdown.")
     if not S["plan"]:
         return _err("No current plan. Call plan_routes first.")
-    d = dict(seed.SCENARIOS[key], multiplier=S["policy"]["delay_factor"].get(key, 1.0))
-    S["disruption"] = d
-    S["pre_disruption_plan"] = S["plan"]
-    if d["kind"] == "breakdown":
-        for v in S["vehicles"]:
-            if v["id"] == d["vehicle_id"]:
-                v["status"] = "broken_down"
-        zone = next((r["stops"] for r in S["plan"]["routes"] if r["vehicle_id"] == d["vehicle_id"]), [])
+    cause = (description or "").strip()
+    multiplier = S["policy"]["delay_factor"].get(k, 1.0)
+
+    if k == "breakdown":
+        vid = (vehicle_id or seed.SCENARIOS["breakdown"]["vehicle_id"]).strip().upper()
+        van = next((v for v in S["vehicles"] if v["id"] == vid), None)
+        if not van:
+            return _err(f"Unknown van '{vehicle_id}'. Valid: {', '.join(v['id'] for v in S['vehicles'])}.")
+        if van["status"] == "broken_down":
+            return _err(f"Van {vid} is already out of service.")
+        d = {"kind": "breakdown", "label": f"Van {vid} broke down" + (f" ({cause})" if cause else ""),
+             "center": None, "radius_km": 0.0, "vehicle_id": vid, "location": None, "multiplier": multiplier}
+        van["status"] = "broken_down"
+        zone = next((r["stops"] for r in S["plan"]["routes"] if r["vehicle_id"] == vid), [])
     else:
+        if location.strip():
+            found = places.resolve(location)
+            if found:
+                place, center = found
+            elif lat and lng and places.in_bounds(lat, lng):
+                place, center = f"{location.strip()} (approx.)", (lat, lng)
+            else:
+                return _err(f"Unknown location '{location}'. Use a Chennai area such as "
+                            f"{', '.join(list(places.PLACES)[:12])}, ..., or pass lat and lng inside Chennai.")
+        elif lat and lng and places.in_bounds(lat, lng):
+            place, center = f"{lat:.3f}, {lng:.3f}", (lat, lng)
+        else:  # no location given: the preset scenario for this kind
+            preset = seed.SCENARIOS[k]
+            place, center = preset["label"].split(" on ")[-1].split(" in ")[-1], tuple(preset["center"])
+        r_km = min(8.0, max(0.5, radius_km or _DEFAULT_RADIUS[k]))
+        label = f"{_KIND_LABEL[k]}{f' ({cause})' if cause else ''} near {place}"
+        d = {"kind": k, "label": label, "center": [center[0], center[1]], "radius_km": r_km,
+             "vehicle_id": None, "location": place, "multiplier": multiplier}
         S["matrix"] = R.cost_matrix(R.apply_disruption(S["base_graph"], d))
         zone = [o["id"] for o in seed.ORDERS if geo.edge_disrupted(o["id"], o["id"], d)]
+
+    S["disruption"] = d
+    S["pre_disruption_plan"] = S["plan"]
     _event("apply_disruption", f"{d['label']}, predicted x{d['multiplier']}")
     _write_state()
-    return {"status": "ok", "label": d["label"], "kind": d["kind"],
+    return {"status": "ok", "label": d["label"], "kind": d["kind"], "location": d["location"],
+            "center": d["center"], "radius_km": d["radius_km"],
             "predicted_multiplier": d["multiplier"], "orders_in_zone": zone}
 
 

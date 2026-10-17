@@ -104,3 +104,48 @@ def test_state_file_is_valid_json_after_every_tool(isolated):
     _flood_run()
     s = _state(isolated)
     assert s["disruption"]["kind"] == "flood" and s["policy"]["version"] == 2
+
+
+# ---------------------------------------------------------------- dynamic disruptions
+def test_traffic_anywhere_by_place_name(isolated):
+    T.plan_routes()
+    a = T.apply_disruption("traffic", "Tambaram", "CM convoy")
+    assert a["status"] == "ok" and a["location"] == "Tambaram" and a["orders_in_zone"] == ["O5"]
+    assert "CM convoy" in a["label"] and "Tambaram" in a["label"]
+    r = T.replan_routes()
+    assert [x["order_id"] for x in r["affected_orders"]] == ["O5"]
+    assert _state(isolated)["disruption"]["center"] == [12.9249, 80.1]
+    d = T.run_day()
+    assert d["delay_factor_change"]["traffic"][1] > 2.5          # learned from Tambaram legs
+
+
+def test_kind_synonyms_typos_and_aliases():
+    T.plan_routes()
+    a = T.apply_disruption("waterlogging", "velachry")
+    assert a["kind"] == "flood" and a["location"] == "Velachery"
+    T.reset(); T.plan_routes()
+    assert T.apply_disruption("road closure", "Old Mahabalipuram Road")["location"] == "OMR"
+
+
+def test_unknown_place_needs_coordinates_inside_chennai():
+    T.plan_routes()
+    assert T.apply_disruption("traffic", "Mumbai")["status"] == "error"
+    assert T.apply_disruption("flood", "Bengaluru", lat=12.97, lng=77.59)["status"] == "error"
+    a = T.apply_disruption("traffic", "Some flyover", lat=13.01, lng=80.21)
+    assert a["status"] == "ok" and a["center"] == [13.01, 80.21]
+
+
+def test_breakdown_any_van_and_presets_still_work():
+    T.plan_routes()
+    a = T.apply_disruption("breakdown", vehicle_id="v1")
+    assert a["status"] == "ok" and a["label"].startswith("Van V1")
+    assert "V1" not in [x["vehicle"] for x in T.replan_routes()["routes"]]
+    T.reset(); T.plan_routes()
+    assert T.apply_disruption("flood")["orders_in_zone"] == ["O6", "O10"]     # no location = OMR preset
+
+
+def test_zone_with_no_orders_replans_cleanly():
+    T.plan_routes()
+    assert T.apply_disruption("traffic", "Ambattur")["orders_in_zone"] == []
+    r = T.replan_routes()
+    assert r["status"] == "ok" and r["affected_orders"] == []
