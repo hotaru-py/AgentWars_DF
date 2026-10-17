@@ -6,11 +6,26 @@ their own state. ADK builds each tool's schema from its type hints and docstring
 """
 
 import copy
+import functools
+import inspect
 import json
 import os
 import time
 
 from . import feedback, geo, places, routing, seed
+
+
+def _replace(src: str, dst: str, tries: int = 20) -> None:
+    """os.replace with retries: on Windows it fails while another process (the UI's web
+    server polling the file) has dst open, so wait a moment and try again."""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.05)
 
 try:  # use Track A's routing once it's merged; until then, Track C's stand-in
     routing.build_graph()
@@ -19,7 +34,7 @@ except NotImplementedError:
     from . import _routing_fallback as R
 
 STATE_PATH = os.path.join(feedback.OUT_DIR, "state.json")
-AFFECTED_MIN = 5.0
+AFFECTED_MIN = 10.0  # notify a customer when their arrival time moves by more than this
 MAX_WORDS = 40
 SHIFT_START_MIN = 9 * 60  # 9:00 AM; ETAs are minutes from shift start
 
@@ -55,7 +70,7 @@ def _write_state() -> None:
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(snapshot, f, indent=2)
-    os.replace(tmp, STATE_PATH)
+    _replace(tmp, STATE_PATH)
 
 
 def _err(message: str) -> dict:
@@ -63,7 +78,47 @@ def _err(message: str) -> dict:
 
 
 def _event(tool: str, summary: str) -> None:
-    S["events"].append({"ts": time.time(), "tool": tool, "summary": summary})
+    """Technical one-liner for the dev panel; _traced attaches it to this call's event."""
+    S["_log"] = summary
+
+
+def _traced(fn):
+    """Record every tool call for the dev panel: args, duration, technical log, plain summary."""
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        t0 = time.time()
+        S.pop("_log", None)
+        result = fn(*args, **kwargs)
+        bound = sig.bind_partial(*args, **kwargs)
+        S["events"].append({"ts": t0, "tool": fn.__name__, "args": dict(bound.arguments),
+                            "ms": round((time.time() - t0) * 1000, 1), "ok": result.get("status") == "ok",
+                            "summary": S.pop("_log", None) or result.get("message", ""),
+                            "plain": result.get("summary") or result.get("message", "")})
+        _write_state()
+        return result
+    return wrapper
+
+
+def _dur(minutes: float) -> str:
+    """150.4 -> "2 hours 30 minutes"; 45 -> "45 minutes"."""
+    h, mm = divmod(int(round(abs(minutes))), 60)
+    parts = [f"{h} hour{'s' if h != 1 else ''}"] if h else []
+    if mm or not h:
+        parts.append(f"{mm} minute{'s' if mm != 1 else ''}")
+    return " ".join(parts)
+
+
+def _who(order_ids: list, limit: int = 4) -> str:
+    """["O6", "O10"] -> "Priya Venkat (Sholinganallur (OMR)) and Anitha Joseph (Thiruvanmiyur (OMR))"."""
+    by_id = {o["id"]: o for o in seed.ORDERS}
+    names = [f"{by_id[o]['customer']} ({by_id[o]['area']})" for o in order_ids if o in by_id]
+    if len(names) > limit:
+        names = names[:limit] + [f"{len(names) - limit} more"]
+    if not names:
+        return "nobody"
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def _summary(plan: dict) -> list[dict]:
@@ -86,6 +141,7 @@ def _etas(plan: dict) -> dict:
 
 
 # ---------------------------------------------------------------- tools
+@_traced
 def get_world_state() -> dict:
     """Get the current situation: orders with deadlines, vans, the current route plan,
     any active disruption, and the learned policy version.
@@ -98,9 +154,15 @@ def get_world_state() -> dict:
             "vehicles": S["vehicles"],
             "plan": _summary(S["plan"]) if S["plan"] else None,
             "disruption": S["disruption"]["label"] if S["disruption"] else None,
-            "policy_version": S["policy"]["version"]}
+            "policy_version": S["policy"]["version"],
+            "summary": (f"{len(seed.ORDERS)} deliveries today, "
+                        f"{sum(v['status'] == 'active' for v in S['vehicles'])} vans working. "
+                        + ("Routes are planned. " if S["plan"] else "No routes planned yet. ")
+                        + (f"Current problem: {S['disruption']['label']}." if S["disruption"]
+                           else "No problems reported."))}
 
 
+@_traced
 def plan_routes() -> dict:
     """Plan today's delivery routes from scratch. Builds 3 candidate plans with
     different strategies, has the critic score each on 5 KPIs, and applies the best.
@@ -117,9 +179,15 @@ def plan_routes() -> dict:
     k = feedback.kpis(S["plan"], seed.ORDERS, S["matrix"])
     S.update(critic=review, kpis=k, baseline_plan=None, before_after=None, affected_orders=None)
     _event("plan_routes", f"critic applied {S['plan']['params']['name']} ({k['overall']:.2f}), {k['total_min']} min")
-    _write_state()
+    vans = sum(1 for r in S["plan"]["routes"] if r["stops"])
+    summary = (f"Planned routes for all {len(_etas(S['plan']))} deliveries using {vans} vans, about "
+               f"{_dur(k['total_min'])} of driving in total. "
+               + ("Every delivery should arrive on time. " if not k["late_orders"]
+                  else f"{k['late_orders']} deliveries may still be late. ")
+               + "I tried 3 different ways of splitting the work and picked the best one.")
     return {"status": "ok", "verdict": "apply", "chosen": S["plan"]["params"]["name"],
-            "candidates": _candidates(review["table"]), "routes": _summary(S["plan"]), "metrics": _metrics(k)}
+            "candidates": _candidates(review["table"]), "routes": _summary(S["plan"]), "metrics": _metrics(k),
+            "summary": summary}
 
 
 _KIND_WORDS = {
@@ -140,6 +208,7 @@ def _kind_of(text: str) -> str | None:
     return None
 
 
+@_traced
 def apply_disruption(kind: str, location: str = "", description: str = "", radius_km: float = 0.0,
                      vehicle_id: str = "", lat: float = 0.0, lng: float = 0.0) -> dict:
     """Register a disruption anywhere in Chennai so the road network (or fleet)
@@ -206,12 +275,19 @@ def apply_disruption(kind: str, location: str = "", description: str = "", radiu
     S["disruption"] = d
     S["pre_disruption_plan"] = S["plan"]
     _event("apply_disruption", f"{d['label']}, predicted x{d['multiplier']}")
-    _write_state()
+    if k == "breakdown":
+        summary = f"Noted: {d['label']}. Its {len(zone)} deliveries need another van."
+    else:
+        summary = (f"Noted: {d['label']}. I'm assuming roads in that area are about {multiplier:.1f} times "
+                   f"slower than normal. "
+                   + (f"Deliveries inside the area: {_who(zone)}." if zone else
+                      "None of today's deliveries are inside the area, but vans may drive through it."))
     return {"status": "ok", "label": d["label"], "kind": d["kind"], "location": d["location"],
             "center": d["center"], "radius_km": d["radius_km"],
-            "predicted_multiplier": d["multiplier"], "orders_in_zone": zone}
+            "predicted_multiplier": d["multiplier"], "orders_in_zone": zone, "summary": summary}
 
 
+@_traced
 def replan_routes() -> dict:
     """Re-optimize the routes for the active disruption. Builds 3 candidates on the
     disrupted network; the critic compares them with doing nothing (keeping the old
@@ -252,8 +328,33 @@ def replan_routes() -> dict:
              affected_orders=[a["order_id"] for a in affected])
     _event("replan_routes", f"{review['verdict']}: {base_k['total_min']} -> {after_k['total_min']} min, "
                             f"{len(affected)} affected")
-    _write_state()
+    dis = S["disruption"]
+    detours = (sum(1 for r in S["plan"]["routes"] for x, y in zip(r["path"], r["path"][1:])
+                   if geo.leg_choice(x, y, dis)["variant"] != 0) if dis.get("center") else 0)
+    saved = base_k["total_min"] - after_k["total_min"]
+    late_avoided = base_k["late_orders"] - after_k["late_orders"]
+    if review["verdict"] == "hold":
+        summary = "None of the new plans beat keeping the current routes, so I kept them."
+    elif saved >= 1:
+        summary = f"Found a better plan: about {_dur(saved)} less driving in total than sticking to the old routes."
+    elif saved <= -1:
+        summary = ("Switched to a plan that keeps deliveries on time and spreads the work more evenly, "
+                   f"at the cost of about {_dur(-saved)} more driving.")
+    else:
+        summary = "There was no faster way around it, so the routes stay much the same."
+    if detours:
+        summary += f" {detours} stretch{'es' if detours != 1 else ''} of road swapped for a detour around the area."
+    if late_avoided > 0:
+        summary += f" {late_avoided} deliveries that would have been late are now on time."
+    elif after_k["late_orders"]:
+        summary += f" {after_k['late_orders']} deliveries will still be late."
+    if affected:
+        summary += (f" {len(affected)} customers' arrival times move by more than {AFFECTED_MIN:.0f} minutes, "
+                    f"so they should be told: {_who([a['order_id'] for a in affected])}.")
+    else:
+        summary += " Nobody's arrival time changes much, so no messages are needed."
     return {"status": "ok", "verdict": review["verdict"], "chosen": S["plan"].get("params", {}).get("name", "do-nothing"),
+            "detours": detours, "summary": summary,
             "do_nothing": _metrics(base_k), "after": _metrics(after_k),
             "time_saved_min": round(base_k["total_min"] - after_k["total_min"], 1),
             "late_orders_avoided": base_k["late_orders"] - after_k["late_orders"],
@@ -261,6 +362,7 @@ def replan_routes() -> dict:
             "affected_orders": affected}
 
 
+@_traced
 def notify_customers(order_ids: list[str], messages: list[str]) -> dict:
     """Send ETA update messages to affected customers (mock send). Call once with all
     messages. order_ids[i] receives messages[i].
@@ -288,10 +390,13 @@ def notify_customers(order_ids: list[str], messages: list[str]) -> dict:
                                        "phone": known[oid]["phone"], "message": msg, "sent": True})
             sent += 1
     _event("notify_customers", f"{sent} sent, {len(rejected)} rejected")
-    _write_state()
-    return {"status": "ok", "sent": sent, "rejected": rejected}
+    summary = f"Sent {sent} message{'s' if sent != 1 else ''} to customers."
+    if rejected:
+        summary += f" {len(rejected)} could not be sent: " + "; ".join(f"{r['order_id']}: {r['reason']}" for r in rejected)
+    return {"status": "ok", "sent": sent, "rejected": rejected, "summary": summary}
 
 
+@_traced
 def run_day() -> dict:
     """Run the simulated delivery day on the current plan, compare predicted and
     realized ETAs, and let the learner update the policy (delay factors). Call after
@@ -311,22 +416,40 @@ def run_day() -> dict:
     run = len(S["policy"]["history"]) + 1
     sim = feedback.simulate_day(S["plan"], S["base_graph"], d, run)
     overall = feedback.kpis(S["plan"], seed.ORDERS, S["matrix"])["overall"]
+    # Score the DELAY prediction (how much later than normal), not the whole trip time:
+    # a flood that covers 2 km of a 20 km trip would otherwise look almost perfectly predicted.
     touched = sim["disrupted_orders"] or list(sim["realized_eta"])
-    predicted = {o: e for o, e in _etas(S["plan"]).items() if o in touched}
-    realized = {o: e for o, e in sim["realized_eta"].items() if o in touched}
+    base, plan_eta = sim["base_eta"], _etas(S["plan"])
+    predicted = {o: round(plan_eta[o] - base[o], 2) for o in touched if o in plan_eta and o in base}
+    realized = {o: round(sim["realized_eta"][o] - base[o], 2) for o in touched if o in base}
     out = feedback.learn(S["policy"], kind, predicted, realized, sim["observed_ratio"], overall)
     S["policy"] = out["policy"]
     S["last_run"] = {"eta_error": out["eta_error"], "changes": out["changes"]}
     feedback.save_policy(S["policy"])
-    _event("run_day", f"ETA error {out['eta_error']:.1%}, {kind} x{out['changes']['delay_factor'][kind][0]} "
+    _event("run_day", f"delay error {out['eta_error']:.1%}, {kind} x{out['changes']['delay_factor'][kind][0]} "
                       f"-> x{out['changes']['delay_factor'][kind][1]}")
-    _write_state()
-    return {"status": "ok", "eta_error": out["eta_error"], "eta_error_pct": f"{out['eta_error']:.1%}",
+    old, new = out["changes"]["delay_factor"][kind]
+    obs = sim["observed_ratio"]
+    if kind == "breakdown":
+        summary = "The day is done. A breakdown doesn't change road speeds, so there was nothing new to learn about delays."
+    elif not obs:
+        summary = "The day is done. None of the vans' roads went through the affected area, so there was nothing new to learn."
+    else:
+        word = {"flood": "the flooding", "traffic": "the traffic"}.get(kind, kind)
+        summary = (f"The day is done. On the affected roads, {word} actually slowed vans about {obs:.1f} times "
+                   f"(I had assumed {old:.1f}). Next time I'll assume {new:.1f} times. "
+                   f"My estimate of how late deliveries would be was off by {out['eta_error']:.0%}.")
+        if out["changes"]["rolled_back"]:
+            summary += " My estimates have been getting worse, so I went back to my previous setting."
+    return {"status": "ok", "summary": summary,
+            "eta_error": out["eta_error"], "eta_error_pct": f"{out['eta_error']:.1%}",
+            "observed_slowdown": obs,
             "delay_factor_change": out["changes"]["delay_factor"],
             "rolled_back": out["changes"]["rolled_back"], "policy_version": S["policy"]["version"],
             "history": [{k: h[k] for k in ("run", "kind", "eta_error", "delay_factor")} for h in S["policy"]["history"]]}
 
 
+@_traced
 def get_policy() -> dict:
     """Get the learned policy: delay factors per disruption kind, candidate
     strategies, and the run history. Read-only.
@@ -335,10 +458,15 @@ def get_policy() -> dict:
         {"status": "ok", "version", "delay_factor", "candidates", "history"}.
     """
     p = S["policy"]
-    return {"status": "ok", "version": p["version"], "delay_factor": p["delay_factor"],
-            "candidates": p["candidates"], "history": p["history"]}
+    df = p["delay_factor"]
+    summary = (f"Right now I expect floods to slow vans about {df['flood']:.1f} times and traffic jams about "
+               f"{df['traffic']:.1f} times. I've learned from {len(p['history'])} day"
+               f"{'s' if len(p['history']) != 1 else ''} so far.")
+    return {"status": "ok", "version": p["version"], "delay_factor": df,
+            "candidates": p["candidates"], "history": p["history"], "summary": summary}
 
 
+@_traced
 def reset(hard: bool = False) -> dict:
     """Reset the day: reload orders and vans, clear disruptions, routes and
     notifications. The learned policy is kept unless hard is True.
@@ -355,7 +483,9 @@ def reset(hard: bool = False) -> dict:
         feedback.save_policy(policy)
     _fresh_state(policy)
     _write_state()
-    return {"status": "ok", "policy_version": S["policy"]["version"]}
+    return {"status": "ok", "policy_version": S["policy"]["version"],
+            "summary": "Started a fresh day: all orders reloaded and every van back at the depot. "
+                       + ("I also forgot everything I had learned." if hard else "I kept what I've learned.")}
 
 
 _fresh_state()

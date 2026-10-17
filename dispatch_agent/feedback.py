@@ -8,9 +8,23 @@ and the learner is the only thing that writes the policy.
 import copy
 import json
 import os
+import time
 import random
 
 from . import geo, seed
+
+
+def _replace(src: str, dst: str, tries: int = 20) -> None:
+    """os.replace with retries: on Windows it fails while another process (the UI's web
+    server polling the file) has dst open, so wait a moment and try again."""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.05)
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 POLICY_PATH = os.path.join(OUT_DIR, "policy.json")
@@ -112,27 +126,38 @@ def simulate_day(plan: dict, base_graph: dict, disruption: dict | None, run: int
     the hidden TRUE slowdown. Returns realized ETAs and the slowdown a fleet would
     observe on the disrupted legs (never TRUTH itself)."""
     mult = _true_multiplier(disruption["kind"], run) if disruption else 1.0
-    realized, disrupted_orders, base_dis, real_dis = {}, [], 0.0, 0.0
+    realized, base_eta, disrupted_orders, base_dis, real_dis = {}, {}, [], 0.0, 0.0
     for r in plan["routes"]:
-        stops, ptr, t, hit = r["stops"], 0, 0.0, False
+        stops, ptr, t, t0, hit = r["stops"], 0, 0.0, 0.0, False
         path = r["path"]
         for a, b in zip(path, path[1:]):
             edge = base_graph.get(a, {}).get(b)
             leg = edge["min"] if edge else geo.km_to_min(geo.road_km(a, b))
-            if geo.edge_disrupted(a, b, disruption):
-                base_dis += leg
-                leg *= mult
-                real_dis += leg
-                hit = True
+            if disruption and disruption.get("center"):
+                # same road the planner picked (under the PREDICTED slowdown) ...
+                c = geo.leg_choice(a, b, disruption)
+                leg *= c["km"] / geo.road_km(a, b) if geo.road_km(a, b) else 1.0
+                # ... but its in-zone part runs at the TRUE slowdown
+                inside = leg * c["frac"]
+                t0 += leg                    # same road, no slowdown
+                if inside > 0:
+                    base_dis += inside
+                    real_dis += inside * mult
+                    leg += inside * (mult - 1)
+                    hit = True
+            else:
+                t0 += leg
             t += leg
             if ptr < len(stops) and b == stops[ptr]:
                 realized[b] = round(t, 1)
+                base_eta[b] = round(t0, 1)
                 if hit:
                     disrupted_orders.append(b)
                 ptr += 1
     return {"realized_eta": realized,
+            "base_eta": base_eta,                  # same roads with no slowdown: delay = eta - base_eta
             "disrupted_orders": disrupted_orders,  # orders whose trip crossed the disruption
-            "observed_ratio": round(real_dis / base_dis, 3) if base_dis else None}
+            "observed_ratio": round(real_dis / base_dis, 3) if base_dis else None}  # = true slowdown on in-zone road
 
 
 # ---------------------------------------------------------------- learner
@@ -186,4 +211,4 @@ def save_policy(policy: dict) -> None:
     tmp = POLICY_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(policy, f, indent=2)
-    os.replace(tmp, POLICY_PATH)
+    _replace(tmp, POLICY_PATH)

@@ -71,9 +71,9 @@ def test_simulate_day_slows_only_disrupted_legs():
     flood = dict(seed.SCENARIOS["flood"], multiplier=4.0)
     plan = _plan("p", 14.4, 36.0)
     r = feedback.simulate_day(plan, _graph(), flood, run=1)
-    assert r["realized_eta"]["O1"] == 14.4                     # T. Nagar leg is outside the flood
-    assert r["realized_eta"]["O6"] > 36.0 * 4.4                # OMR leg at ~5x (+-10%)
-    assert 4.8 <= r["observed_ratio"] <= 5.2
+    assert r["realized_eta"]["O1"] == 14.4                     # T. Nagar road is outside the flood
+    assert r["realized_eta"]["O6"] > 36.0                      # the in-zone part of the OMR road is slower
+    assert 4.8 <= r["observed_ratio"] <= 5.2                   # measured on the in-zone part: true x5 +-3%
 
 
 def test_simulate_day_is_deterministic_per_run_and_hides_truth():
@@ -81,7 +81,7 @@ def test_simulate_day_is_deterministic_per_run_and_hides_truth():
     a = feedback.simulate_day(_plan("p", 14.4, 36.0), _graph(), flood, run=2)
     b = feedback.simulate_day(_plan("p", 14.4, 36.0), _graph(), flood, run=2)
     assert a == b
-    assert set(a) == {"realized_eta", "disrupted_orders", "observed_ratio"}
+    assert set(a) == {"realized_eta", "base_eta", "disrupted_orders", "observed_ratio"}
     assert a["disrupted_orders"] == ["O6"]
 
 

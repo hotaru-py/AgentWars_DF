@@ -37,9 +37,10 @@ def test_apply_disruption_copies_and_slows_flooded_edges():
     slowed = [(a, b) for a in g for b in g[a] if flooded[a][b]["min"] > g[a][b]["min"]]
     assert slowed
     for a, b in slowed:
+        # only the in-zone part of a road slows down (x4), or the van takes a longer detour
         assert geo.edge_disrupted(a, b, FLOOD)
-        assert flooded[a][b]["min"] == g[a][b]["min"] * 4.0
-        assert flooded[a][b]["km"] == g[a][b]["km"]
+        assert g[a][b]["min"] < flooded[a][b]["min"] <= g[a][b]["min"] * 4.0 + 1e-9
+        assert flooded[a][b]["km"] >= g[a][b]["km"]
     assert routing.build_graph() == g  # original untouched
 
 
@@ -64,7 +65,7 @@ def test_cost_matrix_matches_dijkstra():
     for a in g:
         for b in g:
             d = routing.dijkstra(g, a, b)
-            assert m[a][b] == {"min": d["min"], "km": d["km"], "path": d["path"]}
+            assert {k: m[a][b][k] for k in ("min", "km", "path")} == {"min": d["min"], "km": d["km"], "path": d["path"]}
 
 
 def test_flood_changes_matrix_for_omr():
@@ -138,3 +139,19 @@ def test_flood_replan_changes_at_least_one_route_and_beats_do_nothing():
     assert [r["stops"] for r in replan["routes"]] != [r["stops"] for r in base["routes"]] or \
         [r["path"] for r in replan["routes"]] != [r["path"] for r in base["routes"]]
     assert sum(r["duration_min"] for r in replan["routes"]) <= sum(r["duration_min"] for r in nothing["routes"])
+
+
+def test_routes_follow_real_roads():
+    g = routing.build_graph()
+    plan = routing.solve(routing.cost_matrix(g), seed.VEHICLES,
+                         {"name": "t", "late_penalty": 1.0, "balance_weight": 0.5})
+    for r in plan["routes"]:
+        if r["stops"]:
+            assert len(r["geometry"]) > len(r["path"])          # street-level points, not stop-to-stop
+            assert r["geometry"][0] == [round(seed.DEPOT["lat"], 5), round(seed.DEPOT["lng"], 5)]                 or abs(r["geometry"][0][0] - seed.DEPOT["lat"]) < 0.01
+
+
+def test_flood_picks_a_detour_somewhere():
+    g = routing.build_graph()
+    flooded = routing.apply_disruption(g, FLOOD)
+    assert any(flooded[a][b]["variant"] != 0 for a in flooded for b in flooded[a])

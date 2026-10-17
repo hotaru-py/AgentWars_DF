@@ -219,6 +219,7 @@ function totals(plan, orders) {
 }
 function colorFor(vid, i) { return VCOL()[vid] || FALLBACK_COLORS[i % FALLBACK_COLORS.length]; }
 function latlngs(path, idx) { return (path || []).map(id => idx[id]).filter(Boolean).map(n => [n.lat, n.lng]); }
+function roadOf(r, idx) { return (r.geometry && r.geometry.length > 1) ? r.geometry : latlngs(r.path, idx); }  // real streets when available
 
 // ---------------------------------------------------------------- render: map
 function renderMap(s) {
@@ -238,7 +239,7 @@ function renderMap(s) {
 
   // do-nothing plan: old stop order re-timed on the disrupted graph
   (s.baseline_plan?.routes || []).forEach(r => {
-    const ll = latlngs(r.path, idx);
+    const ll = roadOf(r, idx);
     if (ll.length > 1) L.polyline(ll, { color: "#64748b", weight: 3, opacity: 0.7, dashArray: "6 8" })
       .bindTooltip(`Do-nothing ${esc(r.vehicle_id)}: ${fmt(r.duration_min)} min`).addTo(layers.baseline);
   });
@@ -246,7 +247,7 @@ function renderMap(s) {
   // routes
   const isNewPlan = plan && plan.id !== lastPlanId;
   (plan?.routes || []).forEach((r, i) => {
-    const ll = latlngs(r.path, idx);
+    const ll = roadOf(r, idx);
     if (ll.length < 2) return;
     const line = L.polyline(ll, { color: colorFor(r.vehicle_id, i), weight: 5, opacity: 0.9, className: isNewPlan ? "route-new" : "" })
       .bindTooltip(`${esc(r.vehicle_id)} · ${r.stops.length} stops · ${fmt(r.duration_min)} min · ${fmt(r.distance_km)} km`, { sticky: true });

@@ -9,7 +9,8 @@ import itertools
 
 from . import geo, seed
 
-Graph = dict[str, dict[str, dict]]  # graph[a][b] = {"min": float, "km": float}
+Graph = dict[str, dict[str, dict]]  # graph[a][b] = {"min": float, "km": float, "variant": int}
+# "variant" = which real road option (geo.road_options) the van takes on that edge.
 
 _plan_ids = itertools.count(1)
 
@@ -17,7 +18,7 @@ _plan_ids = itertools.count(1)
 # ---------------------------------------------------------------- graph
 def _edge(a: str, b: str) -> dict:
     km = geo.road_km(a, b)
-    return {"min": geo.km_to_min(km), "km": km}
+    return {"min": geo.km_to_min(km), "km": km, "variant": 0}
 
 
 def build_graph(k: int = 4) -> Graph:
@@ -58,12 +59,18 @@ def _components(graph: Graph) -> list[set[str]]:
 
 
 def apply_disruption(graph: Graph, disruption: dict) -> Graph:
-    """Return a copy with flood/traffic edges slowed by disruption["multiplier"]."""
-    mult = disruption.get("multiplier", 1.0) if disruption.get("kind") in ("flood", "traffic") else 1.0
-    return {a: {b: {"min": e["min"] * (mult if geo.edge_disrupted(a, b, disruption) else 1.0),
-                    "km": e["km"]}
-                for b, e in row.items()}
-            for a, row in graph.items()}
+    """Return a copy where each edge takes its best real road under the disruption: the
+    part of a road inside the zone runs disruption["multiplier"] times slower, so a
+    longer road that avoids the zone can win (a real detour)."""
+    if disruption.get("kind") not in ("flood", "traffic"):
+        return {a: {b: dict(e) for b, e in row.items()} for a, row in graph.items()}
+    out: Graph = {}
+    for a, row in graph.items():
+        out[a] = {}
+        for b in row:
+            c = geo.leg_choice(a, b, disruption)
+            out[a][b] = {"min": c["min"], "km": c["km"], "variant": c["variant"]}
+    return out
 
 
 # ---------------------------------------------------------------- shortest paths
@@ -102,15 +109,26 @@ def dijkstra(graph: Graph, a: str, b: str) -> dict:
     return {"path": path, "min": dist[b], "km": _path_km(graph, path)}
 
 
+def _path_geometry(graph: Graph, path: list[str]) -> list:
+    pts: list = []
+    for a, b in zip(path, path[1:]):
+        if a not in geo.NODES or b not in geo.NODES:  # hand-built test graphs have no road data
+            return []
+        seg = geo.leg_geometry(a, b, graph[a][b].get("variant", 0))
+        pts.extend(seg[1:] if pts else seg)
+    return pts
+
+
 def cost_matrix(graph: Graph) -> dict[str, dict[str, dict]]:
-    """All-pairs Dijkstra: m[a][b] = {"min", "km", "path"}."""
+    """All-pairs Dijkstra: m[a][b] = {"min", "km", "path", "geometry"} (geometry = real road shape)."""
     m: dict[str, dict[str, dict]] = {}
     for a in graph:
         dist, prev = _sssp(graph, a)
         m[a] = {}
         for b in dist:
             path = _path(prev, a, b)
-            m[a][b] = {"min": dist[b], "km": _path_km(graph, path), "path": path}
+            m[a][b] = {"min": dist[b], "km": _path_km(graph, path), "path": path,
+                       "geometry": _path_geometry(graph, path)}
     return m
 
 
@@ -122,16 +140,19 @@ URGENT_FACTOR = 3.0
 
 def _timeline(stops: list[str], matrix: dict) -> dict:
     """Drive depot -> stops in order (no return leg); ETAs in minutes from shift start."""
-    path, etas, t, km, cur = [_DEPOT], {}, 0.0, 0.0, _DEPOT
+    path, etas, t, km, cur, geom = [_DEPOT], {}, 0.0, 0.0, _DEPOT, []
     for s in stops:
         leg = matrix[cur][s]
         t += leg["min"]
         km += leg["km"]
         path.extend(leg["path"][1:])
+        lg = leg.get("geometry") or []
+        geom.extend(lg[1:] if geom else lg)
         etas[s] = round(t, 2)
         cur = s
     return {"stops": list(stops), "path": path, "eta_by_order": etas,
-            "duration_min": round(t, 2), "distance_km": round(km, 2)}
+            "duration_min": round(t, 2), "distance_km": round(km, 2),
+            "geometry": geom}  # [[lat, lng], ...] along real roads, for the map
 
 
 def _lateness(stops: list[str], matrix: dict, penalty: float) -> float:

@@ -5,7 +5,8 @@
     python run.py --fresh      same, but first forget what the agent has learned
     python run.py --no-open    don't open a browser tab
 
-Needs GOOGLE_API_KEY in dispatch_agent/.env (copied from .env.example on first run).
+No Gemini key yet? Just start it: the console asks for the key on load, checks it
+with Google, saves it to dispatch_agent/.env and restarts the agent.
 Uses the project's .venv automatically if there is one. Ctrl+C stops both servers.
 Env overrides: API_PORT, UI_PORT. Standard library only.
 """
@@ -13,6 +14,7 @@ Env overrides: API_PORT, UI_PORT. Standard library only.
 import argparse
 import functools
 import http.server
+import json
 import os
 import re
 import shutil
@@ -22,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 
@@ -31,6 +34,10 @@ OUT_DIR = os.path.join(AGENT_DIR, "out")
 ENV_FILE = os.path.join(AGENT_DIR, ".env")
 API_PORT = int(os.environ.get("API_PORT", 8000))
 UI_PORT = int(os.environ.get("UI_PORT", 8001))
+ALLOWED_ORIGINS = {f"http://localhost:{UI_PORT}", f"http://127.0.0.1:{UI_PORT}"}
+KEY_RE = re.compile(r"^[A-Za-z0-9._\-]{20,200}$")
+
+restart_agent = threading.Event()   # set by the key endpoint; the main loop restarts the agent
 
 
 def venv_python() -> str | None:
@@ -43,7 +50,7 @@ def has_api_key() -> bool:
     if os.environ.get("GOOGLE_API_KEY"):
         return True
     try:
-        with open(ENV_FILE, encoding="utf-8") as f:
+        with open(ENV_FILE, encoding="utf-8-sig") as f:
             return any(re.match(r"\s*GOOGLE_API_KEY\s*=\s*\S+", line) for line in f)
     except OSError:
         return False
@@ -55,24 +62,115 @@ def port_busy(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def api_up() -> bool:
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{API_PORT}/list-apps", timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
 def wait_for_api(timeout: float = 40) -> bool:
     end = time.time() + timeout
     while time.time() < end:
-        try:
-            urllib.request.urlopen(f"http://127.0.0.1:{API_PORT}/list-apps", timeout=1).close()
+        if api_up():
             return True
-        except OSError:
-            time.sleep(0.5)
+        time.sleep(0.5)
     return False
 
 
-class QuietHandler(http.server.SimpleHTTPRequestHandler):
+def check_key(key: str) -> tuple[bool, str]:
+    """Ask Google whether the key works (lists models; costs no generation quota)."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key={key}"
+    try:
+        urllib.request.urlopen(url, timeout=10).close()
+        return True, "ok"
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401, 403):
+            return False, "Google rejected this key. Copy it again from AI Studio and check for missing characters."
+        return True, f"Couldn't fully check the key (Google answered {e.code}); saved it anyway."
+    except OSError:
+        return True, "No internet connection to check the key; saved it anyway."
+
+
+def save_key(key: str) -> None:
+    """Write GOOGLE_API_KEY into dispatch_agent/.env, keeping every other line."""
+    lines = []
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, encoding="utf-8-sig") as f:
+            lines = [line.rstrip("\n") for line in f]
+    elif os.path.exists(os.path.join(AGENT_DIR, ".env.example")):
+        with open(os.path.join(AGENT_DIR, ".env.example"), encoding="utf-8-sig") as f:
+            lines = [line.rstrip("\n") for line in f]
+    lines = [line for line in lines if not re.match(r"\s*GOOGLE_API_KEY\s*=", line)]
+    if not any(re.match(r"\s*GOOGLE_GENAI_USE_VERTEXAI\s*=", line) for line in lines):
+        lines.insert(0, "GOOGLE_GENAI_USE_VERTEXAI=FALSE")
+    lines.insert(1, f"GOOGLE_API_KEY={key}")
+    tmp = ENV_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, ENV_FILE)
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    """Static files for the console, plus a tiny local-only key API."""
+
     def log_message(self, *args):
         pass
 
     def end_headers(self):  # always serve fresh state.json
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def _json(self, code: int, body: dict) -> None:
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path.split("?")[0] == "/api/key-status":   # never returns the key itself
+            return self._json(200, {"has_key": has_api_key(), "agent_ready": api_up() and not restart_agent.is_set()})
+        return super().do_GET()
+
+    def do_POST(self):
+        if self.path.split("?")[0] != "/api/key":
+            return self._json(404, {"ok": False, "message": "not found"})
+        # Only the console page itself may set the key: same-origin + JSON (cross-site forms can't send JSON)
+        if self.headers.get("Origin") not in ALLOWED_ORIGINS or "application/json" not in (self.headers.get("Content-Type") or ""):
+            return self._json(403, {"ok": False, "message": "forbidden"})
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 4096)
+            key = str(json.loads(self.rfile.read(length) or b"{}").get("key", "")).strip().strip('"').strip("'")
+        except (ValueError, AttributeError):
+            return self._json(400, {"ok": False, "message": "Bad request."})
+        if not KEY_RE.match(key):
+            return self._json(400, {"ok": False, "message": "That doesn't look like an API key. It should be one long string with no spaces."})
+        valid, note = check_key(key)
+        if not valid:
+            return self._json(400, {"ok": False, "message": note})
+        save_key(key)
+        restart_agent.set()
+        print("API key saved to dispatch_agent/.env. Restarting the agent...", flush=True)
+        return self._json(200, {"ok": True, "message": note if note != "ok" else "Key saved."})
+
+
+def start_agent() -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-m", "google.adk.cli", "api_server", "--port", str(API_PORT),
+         f"--allow_origins=http://localhost:{UI_PORT}", f"--allow_origins=http://127.0.0.1:{UI_PORT}", "."],
+        cwd=ROOT)
+
+
+def stop_agent(agent: subprocess.Popen) -> None:
+    if agent.poll() is None:
+        agent.terminate()
+        try:
+            agent.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            agent.kill()
 
 
 def main() -> int:
@@ -92,12 +190,11 @@ def main() -> int:
         print("google-adk is not installed. Run: pip install -r requirements.txt")
         return 1
 
+    if not os.path.exists(ENV_FILE) and os.path.exists(os.path.join(AGENT_DIR, ".env.example")):
+        shutil.copy(os.path.join(AGENT_DIR, ".env.example"), ENV_FILE)
     if not has_api_key():
-        if not os.path.exists(ENV_FILE):
-            shutil.copy(os.path.join(AGENT_DIR, ".env.example"), ENV_FILE)
-        print(f"Set GOOGLE_API_KEY in {os.path.relpath(ENV_FILE, ROOT)} first "
-              "(get a key at https://aistudio.google.com/apikey), then re-run.")
-        return 1
+        print("No Gemini API key yet: the console will ask for it when it opens.\n"
+              "(Get one at https://aistudio.google.com/apikey)")
 
     for port in (API_PORT, UI_PORT):
         if port_busy(port):
@@ -121,37 +218,34 @@ def main() -> int:
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), _stop)
 
-    ui = http.server.ThreadingHTTPServer(
-        ("127.0.0.1", UI_PORT), functools.partial(QuietHandler, directory=AGENT_DIR))
+    ui = http.server.ThreadingHTTPServer(("127.0.0.1", UI_PORT), functools.partial(Handler, directory=AGENT_DIR))
     threading.Thread(target=ui.serve_forever, daemon=True).start()
 
-    agent = subprocess.Popen(
-        [sys.executable, "-m", "google.adk.cli", "api_server", "--port", str(API_PORT),
-         f"--allow_origins=http://localhost:{UI_PORT}", f"--allow_origins=http://127.0.0.1:{UI_PORT}", "."],
-        cwd=ROOT)
+    agent = start_agent()
     try:
         print("Waiting for the agent API...", flush=True)
         if not wait_for_api():
             print("The agent API did not start. See the log above.")
             return 1
-        if agent.poll() is not None:
-            return agent.returncode or 1
         url = f"http://localhost:{UI_PORT}/console.html?api=http://localhost:{API_PORT}"
         print(f"\nDispatch Console: {url}\nCtrl+C to stop.\n", flush=True)
         if not args.no_open:
             webbrowser.open(url)
-        agent.wait()
-        return agent.returncode or 0
+        while True:
+            if restart_agent.is_set():          # new key saved from the console
+                stop_agent(agent)
+                agent = start_agent()
+                wait_for_api()
+                restart_agent.clear()
+                print("Agent restarted with the new key.", flush=True)
+            elif agent.poll() is not None:
+                return agent.returncode or 0
+            time.sleep(0.3)
     except KeyboardInterrupt:
         print("\nStopping...")
         return 0
     finally:
-        if agent.poll() is None:
-            agent.terminate()
-            try:
-                agent.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                agent.kill()
+        stop_agent(agent)
         ui.shutdown()
 
 
