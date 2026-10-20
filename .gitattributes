@@ -1,3 +1,0 @@
-# Context files are append-only logs: on a conflicting merge, keep both sides' lines.
-specs/CONTEXT.md merge=union
-specs/context/*.md merge=union

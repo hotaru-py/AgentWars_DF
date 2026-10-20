@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispatch Console</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<!--
+  Dispatch v2 console. Started by `python run.py` (serves this page on :8001, the API on :8080).
+  Reads GET /state, listens to GET /stream (Server-Sent Events) and acts through the v2 API.
+  Options: ?api=http://127.0.0.1:8080
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f8faf8; --surface: #fff; --glass: rgba(255,255,255,.82); --glass-2: rgba(12,20,17,.05);
+    --fg: #0c1411; --muted: #5a6b64; --faint: #67766e; --line: rgba(12,20,17,.11); --line-strong: rgba(12,20,17,.2);
+    --a: #007186; --b: #5fa143; --mid: #2e8966; --grad: linear-gradient(135deg, var(--a), var(--b));
+    --good: #2e8966; --bad: #d1435b; --warn: #b7791f; --shadow: 0 12px 40px rgba(12,20,17,.14);
+    --tiles: grayscale(.55) contrast(.95) brightness(1.03);
+    --sans: "Geist", ui-sans-serif, system-ui, "Segoe UI", sans-serif; --mono: "Geist Mono", ui-monospace, Menlo, monospace;
+  }
+  :root[data-theme="dark"] {
+    --bg: #080c0a; --surface: #0f1512; --glass: rgba(15,21,18,.82); --glass-2: rgba(233,240,236,.06);
+    --fg: #e9f0ec; --muted: #93a49b; --faint: #7d8e85; --line: rgba(233,240,236,.11); --line-strong: rgba(233,240,236,.22);
+    --good: #5fc79a; --bad: #fb7185; --warn: #fbbf24; --shadow: 0 14px 44px rgba(0,0,0,.55);
+    --tiles: invert(1) grayscale(.9) brightness(1.05) contrast(1.15) sepia(.6) hue-rotate(100deg) saturate(1.1);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 400 14px/1.5 var(--sans); overflow: hidden; }
+  #map { position: absolute; inset: 0; background: var(--bg); }
+  .leaflet-container { font: inherit; background: var(--bg); } .leaflet-tile-pane { filter: var(--tiles); }
+  .leaflet-control-zoom { display: none; }
+  .leaflet-control-attribution { background: var(--glass) !important; color: var(--faint) !important; }
+  .leaflet-tooltip { background: var(--surface); color: var(--fg); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow); font-family: var(--sans); }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  .glass { background: var(--glass); backdrop-filter: blur(18px) saturate(150%); border: 1px solid var(--line); box-shadow: var(--shadow); }
+  .float { position: absolute; z-index: 800; }
+  .label { font: 500 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--faint); margin: 0 0 10px; }
+  .sect { padding: 14px 16px; border-top: 1px solid var(--line); }
+  .pill { all: unset; box-sizing: border-box; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px;
+    border: 1px solid var(--line-strong); background: var(--glass); font: 500 13px/1 var(--sans); white-space: nowrap; }
+  .pill:hover:not(:disabled) { border-color: var(--mid); } .pill:disabled { opacity: .45; cursor: not-allowed; }
+  .pill.primary { background: var(--grad); color: #fff; border-color: transparent; } .pill.small { padding: 6px 12px; font-size: 12px; }
+  .circle { all: unset; cursor: pointer; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; border: 1px solid var(--line-strong); background: var(--glass); }
+  .muted { color: var(--muted); } .empty { color: var(--muted); font-size: 13px; } .good { color: var(--good); } .bad { color: var(--bad); }
+  .mono { font-family: var(--mono); }
+
+  #brand { left: 16px; top: 16px; border-radius: 999px; padding: 6px 18px 6px 6px; display: flex; align-items: center; gap: 12px; }
+  .mark { width: 36px; height: 36px; border-radius: 50%; background: var(--grad); display: grid; place-items: center; color: #fff; font: 600 16px var(--mono); }
+  #brand b { font-weight: 500; font-size: 16px; display: block; line-height: 1.15; }
+  #brand small { font: 400 10.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+  #topright { right: 16px; top: 16px; display: flex; gap: 8px; align-items: center; }
+  .chip { font: 400 11px var(--mono); padding: 3px 10px; border-radius: 999px; background: var(--glass-2); border: 1px solid var(--line); white-space: nowrap; }
+  .chip.on { border-color: var(--good); color: var(--good); } .chip.off { color: var(--faint); } .chip.late { border-color: var(--bad); color: var(--bad); }
+
+  #dash { left: 16px; top: 72px; bottom: 16px; width: 340px; border-radius: 22px; display: flex; flex-direction: column; overflow: hidden; }
+  #dash .scroll, #side .scroll { overflow-y: auto; flex: 1; }
+  .kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .kpi { background: var(--glass-2); border: 1px solid var(--line); border-radius: 14px; padding: 9px 12px; }
+  .kpi .k { color: var(--muted); font-size: 12px; } .kpi .v { font-size: 24px; font-weight: 300; letter-spacing: -.03em; }
+  .van { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); } .van:last-child { border: 0; }
+  .van .sw { width: 4px; border-radius: 4px; flex: none; } .van .top { display: flex; justify-content: space-between; }
+  .van .top span { color: var(--muted); font: 400 11.5px var(--mono); } .van.off .top b { text-decoration: line-through; color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { color: var(--faint); font: 500 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; text-align: left; padding: 2px 4px 6px; }
+  td { padding: 5px 4px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; } tr.best td { color: var(--good); font-weight: 500; }
+
+  #side { right: 16px; top: 72px; bottom: 132px; width: 360px; border-radius: 22px; display: flex; flex-direction: column; overflow: hidden; }
+  .tabs { display: flex; gap: 4px; padding: 10px 12px 0; }
+  .tab { all: unset; cursor: pointer; padding: 6px 12px; border-radius: 999px; color: var(--muted); font-weight: 500; font-size: 12.5px; }
+  .tab.on { background: var(--glass-2); color: var(--fg); } .tab .n { background: var(--bad); color: #fff; border-radius: 999px; padding: 0 6px; font-size: 11px; margin-left: 4px; }
+  .ev { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; } .ev:first-child { border: 0; }
+  .ev .t { font: 400 11px var(--mono); color: var(--mid); white-space: nowrap; padding-top: 2px; }
+  .card { background: var(--glass-2); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
+  .card .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .card select, .card input[type=range] { background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; padding: 4px 6px; }
+
+  #dock { left: 372px; right: 392px; bottom: 16px; border-radius: 22px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  #report { display: flex; gap: 8px; }
+  #report input { flex: 1; min-width: 0; background: var(--glass-2); border: 1px solid var(--line-strong); border-radius: 999px; padding: 10px 16px; outline: none; }
+  #report input:focus { border-color: var(--mid); }
+  #report select { background: var(--glass-2); border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 10px; }
+  #hint { font-size: 13px; color: var(--muted); } #hint b { color: var(--fg); font-weight: 500; }
+  #toast { left: 50%; top: 76px; transform: translateX(-50%); padding: 10px 16px; border-radius: 16px; display: none; max-width: 520px; z-index: 950; }
+  #toast.show { display: block; }
+
+  .pin { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 600 11px var(--sans); color: #06110c; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+  .pin.urgent { border-color: var(--bad); } .pin.late { box-shadow: 0 0 0 3px rgba(209,67,91,.55); }
+  .depot { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; font: 600 13px var(--mono); color: #fff; background: var(--grad); border: 2px solid #fff; }
+  body.picking #map { cursor: crosshair; }
+
+  #keyDlg { position: fixed; inset: 0; z-index: 2000; display: none; place-items: center; background: rgba(4,8,6,.55); }
+  #keyDlg.show { display: grid; } #keyDlg .card { width: min(460px, calc(100vw - 32px)); border-radius: 22px; padding: 22px; background: var(--surface); }
+  #keyDlg input { width: 100%; background: var(--glass-2); border: 1px solid var(--line-strong); border-radius: 999px; padding: 10px 16px; font: 13px var(--mono); }
+  #fab { right: 20px; bottom: 20px; width: 56px; height: 56px; border-radius: 50%; border: 0; cursor: pointer; z-index: 900; background: var(--grad); color: #fff; font-size: 24px; box-shadow: var(--shadow); }
+  #chat { right: 16px; top: 72px; bottom: 16px; width: 380px; border-radius: 22px; display: none; flex-direction: column; overflow: hidden; z-index: 940; }
+  body.chat-open #chat { display: flex; } body.chat-open #fab, body.chat-open #side { display: none; }
+  #msgs { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .m { max-width: 92%; padding: 9px 13px; border-radius: 18px; white-space: pre-wrap; word-wrap: break-word; }
+  .m.me { align-self: flex-end; background: var(--grad); color: #fff; } .m.bot { align-self: flex-start; background: var(--glass-2); border: 1px solid var(--line); }
+  .m.err { align-self: stretch; border: 1px solid var(--bad); color: var(--bad); font-size: 13px; }
+  .step { font: 400 11.5px var(--mono); color: var(--muted); align-self: flex-start; padding: 2px 10px; border: 1px solid var(--line-strong); border-radius: 999px; }
+  .step.ok { color: var(--good); border-color: var(--good); } .step.bad { color: var(--bad); border-color: var(--bad); }
+  #chatForm { display: flex; gap: 8px; padding: 10px 12px 14px; }
+  #chatForm input { flex: 1; min-width: 0; background: var(--glass-2); border: 1px solid var(--line-strong); border-radius: 999px; padding: 10px 16px; outline: none; }
+  .risk { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .risk:last-child { border-bottom: 0; } .risk .bar { width: 46px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; flex: none; }
+  .risk .bar i { display: block; height: 100%; background: var(--bad); }
+  .twin td:not(:first-child), .twin th:not(:first-child) { text-align: right; }
+  @media (max-width: 1100px) { #side { display: none; } #dock { right: 16px; } }
+  @media (max-width: 760px) { #dash { display: none; } #dock { left: 16px; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="brand" class="float glass"><div class="mark">D</div><div><b>Dispatch</b><small id="sub">v2 · loading…</small></div></div>
+<div id="topright" class="float"><span id="prov" class="chips" style="margin:0"></span>
+  <button class="circle" id="themeBtn" title="Light / dark">◐</button></div>
+<div id="toast" class="float glass"></div>
+
+<aside id="dash" class="float glass"><div class="scroll">
+  <div class="sect" style="border:0"><p class="label">Key numbers</p><div class="kpis" id="kpis"></div></div>
+  <div class="sect"><p class="label">Fleet</p><div id="fleet"></div></div>
+  <div class="sect"><p class="label">Plans compared</p><div id="plans"></div></div>
+  <div class="sect"><p class="label">Failed-delivery prevention</p><div id="risk"></div><div id="twin"></div></div>
+  <div class="sect"><p class="label">Getting smarter</p><div id="learn"></div><div id="policy" class="chips"></div></div>
+</div></aside>
+
+<aside id="side" class="float glass">
+  <div class="tabs"><button class="tab on" data-t="act">Activity</button><button class="tab" data-t="q">Needs you<span id="qn"></span></button><button class="tab" data-t="cust">Customers</button><button class="tab" data-t="dec">Decisions</button></div>
+  <div class="scroll sect" style="border:0"><div id="act"></div><div id="q" hidden></div><div id="cust" hidden></div><div id="dec" hidden></div></div>
+</aside>
+
+<div id="dock" class="float glass">
+  <div id="hint"></div>
+  <form id="report"><input id="text" autocomplete="off" placeholder="Report a problem, e.g. “CM convoy causing traffic in Tambaram”">
+    <select id="van" title="If a van broke down, pick it"><option value="">no van</option></select>
+    <button class="pill primary" id="send">Report</button></form>
+  <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="pill" id="planBtn">🗺️ Plan routes</button>
+    <button class="pill" id="riskBtn" title="Score each delivery's chance of failing and ask risky customers to confirm">🛡️ Check risky deliveries</button>
+    <button class="pill" id="dayBtn">▶ Run the day</button>
+    <button class="pill" id="resetBtn" hidden title="A fresh demo day; what was learned is kept">↺ New demo day</button></div>
+</div>
+
+<button id="fab" class="float" title="Ask the dispatcher">💬</button>
+<section id="chat" class="float glass" aria-label="Chat with the dispatcher">
+  <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)"><div class="mark" style="width:30px;height:30px;font-size:13px">D</div>
+    <b style="flex:1;font-weight:500">Dispatcher</b><button class="pill small" id="chatNew" title="New conversation">↺</button><button class="pill small" id="chatClose">✕</button></div>
+  <div id="msgs"></div>
+  <form id="chatForm"><input id="chatIn" autocomplete="off" placeholder="Ask anything, e.g. “where is Priya's parcel?”"><button class="pill primary" id="chatSend">Send</button></form>
+</section>
+
+<div id="keyDlg" role="dialog" aria-modal="true"><form class="card" id="keyForm">
+  <h2 style="margin:0 0 6px;font-weight:400">Connect Gemini</h2>
+  <p class="muted" style="margin:0 0 12px">Reported problems are understood by an AI model. Without a key, every report waits in <b>Needs you</b> for a person. Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.</p>
+  <input id="keyInput" type="password" autocomplete="off" placeholder="Paste your Gemini API key">
+  <p id="keyMsg" class="muted" style="min-height:20px"></p>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="pill" id="keyLater">Later</button><button class="pill primary">Save and restart</button></div>
+</form></div>
+
+<script>
+"use strict";
+const q = new URLSearchParams(location.search);
+const API = (q.get("api") || "http://127.0.0.1:8080").replace(/\/$/, "");
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+const setTheme = t => { document.documentElement.dataset.theme = t; store.set("theme", t); };
+setTheme(store.get("theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+$("themeBtn").onclick = () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+const COLORS = ["#38bdf8", "#f472b6", "#a3e635", "#fbbf24", "#a78bfa", "#34d399"];
+let S = null, tz = "Asia/Kolkata", picking = null;
+const clock = iso => iso ? new Intl.DateTimeFormat("en-IN", { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(iso)) : "–";
+const dur = s => { const m = Math.round((s || 0) / 60), h = Math.floor(m / 60); return h ? `${h} h ${m % 60} min` : `${m} min`; };
+const pct = x => `${Math.round((x || 0) * 100)}%`;
+async function api(path, opts = {}) {
+  const r = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+  return body;
+}
+function toast(html, ms = 6000) { $("toast").innerHTML = html; $("toast").classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => $("toast").classList.remove("show"), ms); }
+
+/* ---------------- map ---------------- */
+const map = L.map("map", { zoomControl: false }).setView([13.0, 80.21], 11);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap contributors", maxZoom: 18 }).addTo(map);
+const layers = { zones: L.layerGroup().addTo(map), routes: L.layerGroup().addTo(map), pins: L.layerGroup().addTo(map) };
+let fitted = false;
+function drawMap() {
+  Object.values(layers).forEach(l => l.clearLayers());
+  if (!S?.depot) return;
+  const d = S.depot.location, byId = Object.fromEntries(S.orders.map(o => [o.id, o]));
+  const vcol = Object.fromEntries(S.vehicles.map((v, i) => [v.id, COLORS[i % COLORS.length]]));
+  for (const inc of S.incidents) {
+    if (inc.area?.kind !== "circle") continue;
+    const c = inc.area.center, col = inc.state === "active" ? "#fb7185" : "#fbbf24";
+    L.circle([c.lat, c.lng], { radius: inc.area.radius_m, color: col, weight: 1.5, fillColor: col, fillOpacity: .14, dashArray: "6 6" })
+      .bindTooltip(`${esc(inc.description)}<br><b>${esc(inc.state)}</b>${inc.state === "active" ? ` · roads ~${inc.slowdown.toFixed(1)}× slower` : ""}`, { sticky: true }).addTo(layers.zones);
+  }
+  const van = {}, eta = {};
+  for (const r of S.plan?.routes || []) {
+    r.stops.forEach(s => { van[s.order_id] = r.vehicle_id; eta[s.order_id] = s; });
+    if (!r.stops.length) continue;
+    const line = r.geometry?.length > 1 ? r.geometry.map(p => [p.lat, p.lng])
+      : [[d.lat, d.lng], ...r.stops.map(s => [byId[s.order_id].location.lat, byId[s.order_id].location.lng])];
+    L.polyline(line, { color: vcol[r.vehicle_id], weight: 8, opacity: .18 }).addTo(layers.routes);
+    L.polyline(line, { color: vcol[r.vehicle_id], weight: 3.5, opacity: .95 }).addTo(layers.routes);
+  }
+  S.orders.forEach((o, i) => {
+    if (!o.location) return;
+    const e = eta[o.id], late = e && o.window_end && e.eta_p50 > o.window_end;
+    L.marker([o.location.lat, o.location.lng], { icon: L.divIcon({ className: "", iconSize: [26, 26], iconAnchor: [13, 13],
+      html: `<div class="pin ${o.priority === "urgent" ? "urgent" : ""} ${late ? "late" : ""}" style="background:${van[o.id] ? vcol[van[o.id]] : "#94a3b8"}">${i + 1}</div>` }) })
+      .bindTooltip(`<b>${esc(o.customer || o.id)}</b> · ${esc((o.notes || o.raw_address).split("\n")[0])}<br>${e ? `Arrives ${clock(e.eta_p50)}` : "Not planned"}${o.window_end ? ` · due ${clock(o.window_end)}` : ""}${late ? ' · <b style="color:#d1435b">late</b>' : ""}${o.risk != null ? `<br>Chance of failing: ${pct(o.risk)}${riskNote(o) ? ` · ${riskNote(o)}` : ""}` : ""}${e?.call_first ? "<br>☎ Driver calls first" : ""}<br><span class="mono">${esc(o.state)}</span>`, { direction: "top" })
+      .addTo(layers.pins);
+  });
+  L.marker([d.lat, d.lng], { icon: L.divIcon({ className: "", iconSize: [32, 32], iconAnchor: [16, 16], html: '<div class="depot">D</div>' }) })
+    .bindTooltip(esc(S.depot.name)).addTo(layers.pins);
+  if (!fitted) { map.fitBounds(L.latLngBounds([[d.lat, d.lng], ...S.orders.filter(o => o.location).map(o => [o.location.lat, o.location.lng])]).pad(.15), { paddingTopLeft: [360, 0], paddingBottomRight: [380, 120] }); fitted = true; }
+}
+map.on("click", e => { if (picking) { const cb = picking; picking = null; document.body.classList.remove("picking"); cb(e.latlng); } });
+
+/* ---------------- panels ---------------- */
+function render() {
+  if (!S?.depot) { $("sub").textContent = "v2 · no depot yet"; return; }
+  tz = S.tz || tz;
+  $("sub").textContent = `${S.depot.name} · ${S.orders.length} orders · ${S.vehicles.length} vans`;
+  $("prov").innerHTML = [["AI triage", S.llm], ["Jev", S.jev]].map(([k, on]) => `<span class="chip ${on ? "on" : "off"}">${k} ${on ? "on" : "off"}</span>`).join("")
+    + `<span class="chip">${esc(S.routing)}</span>`;
+  $("resetBtn").hidden = !S.demo;
+  const sc = S.plan?.scores;
+  $("kpis").innerHTML = sc ? [["Total driving", dur(sc.total_duration_s)], ["Distance", `${(sc.total_distance_m / 1000).toFixed(0)} km`],
+    ["Late deliveries", `${sc.late_orders} / ${S.orders.length}`], ["Plan quality", `${Math.round(sc.overall * 100)}/100`]]
+    .map(([k, v]) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("")
+    : `<div class="empty" style="grid-column:1/-1">Numbers appear once routes are planned.</div>`;
+  const byId = Object.fromEntries(S.orders.map(o => [o.id, o]));
+  $("fleet").innerHTML = S.vehicles.map((v, i) => {
+    const r = S.plan?.routes.find(x => x.vehicle_id === v.id), off = v.state !== "active";
+    const chips = (r?.stops || []).map(s => { const o = byId[s.order_id], late = o?.window_end && s.eta_p50 > o.window_end;
+      return `<span class="chip ${late ? "late" : ""}" title="${esc(o?.customer)}${s.call_first ? ": driver calls first (no reply yet)" : ""}">${s.call_first ? "☎ " : ""}${esc((o?.notes || "").split("\n")[0].split(" (")[0] || s.order_id.slice(-4))} · ${clock(s.eta_p50)}</span>`; }).join("");
+    return `<div class="van ${off ? "off" : ""}"><div class="sw" style="background:${COLORS[i % COLORS.length]}"></div><div style="flex:1">
+      <div class="top"><b>${esc(v.name || v.id)}</b><span>${off ? esc(v.state.replace("_", " ")) : r?.stops.length ? `${dur(r.duration_s)} · ${(r.distance_m / 1000).toFixed(1)} km` : "idle"}</span></div>
+      <div class="chips">${chips}</div></div></div>`;
+  }).join("") || `<div class="empty">No vans.</div>`;
+  const cands = S.plan_decision?.cost?.candidates || [];
+  $("plans").innerHTML = cands.length ? `<table><tr><th>Plan</th><th>Quality</th><th>Driving</th><th>Late</th></tr>${cands.map(c =>
+    `<tr class="${c.plan_id === S.plan?.id ? "best" : ""}"><td>${esc(c.name)}${c.plan_id === S.plan?.id ? " ✓" : ""}</td><td>${Math.round(c.overall * 100)}</td><td>${dur(c.total_duration_s)}</td><td>${c.late_orders}</td></tr>`).join("")}</table>
+    <div class="muted" style="font-size:12px;margin-top:4px">${S.plan_decision.action.kind === "hold" ? "Kept the current plan: nothing new was better." : "Chosen by the plan checker (code, not AI)."}</div>`
+    : `<div class="empty">Plan routes to compare 3 ways of splitting the work.</div>`;
+  renderRisk();
+  $("policy").innerHTML = Object.entries(S.policy?.delay_factor || {}).map(([k, v]) => `<span class="chip">${esc(k)} slows ×${(+v).toFixed(2)}</span>`).join("");
+  $("learn").innerHTML = learnChart(S.policy?.history || []);
+  const vanSel = $("van"), cur = vanSel.value;
+  vanSel.innerHTML = `<option value="">no van</option>` + S.vehicles.map(v => `<option value="${esc(v.id)}">${esc(v.name || v.id)}</option>`).join("");
+  vanSel.value = cur;
+  $("hint").innerHTML = !S.plan ? "Start by <b>planning today's routes</b>." :
+    !S.orders.some(o => o.risk != null) ? "Routes are planned. <b>🛡️ Check risky deliveries</b> before the vans leave." :
+    S.queue ? `<b>${S.queue} report${S.queue > 1 ? "s" : ""} need${S.queue > 1 ? "" : "s"} you</b>: see the Needs you tab.` :
+    "Routes are live. <b>Report a problem</b> in plain words and the system handles it.";
+  drawMap();
+}
+
+const riskNote = o => o.customer_reply ? `replied: ${o.customer_reply.replaceAll("_", " ")}` : o.confirm_requested_at ? "asked to confirm, no reply yet" : "";
+const DONE = new Set(["delivered", "failed", "rto", "cancelled"]);
+function renderRisk() {
+  const scored = S.orders.filter(o => o.risk != null).sort((a, b) => b.risk - a.risk);
+  if (!scored.length) { $("risk").innerHTML = `<div class="empty">Press <b>🛡️ Check risky deliveries</b>: each delivery gets a chance of failing (nobody home, refused, address not found) from the customer's history, payment and address, and risky customers are asked to confirm.</div>`; return; }
+  const risky = scored.filter(o => o.confirm_requested_at || o.risk >= (S.risk_threshold ?? 0.1));
+  $("risk").innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:4px">${risky.length} of ${scored.length} deliveries look risky. <span id="mlNote"></span></div>` + risky.map(o =>
+    `<div class="risk" data-id="${esc(o.id)}"><div class="bar"><i style="width:${Math.min(100, o.risk * 100 / 0.5)}%"></i></div>
+      <div style="flex:1"><b>${esc(o.customer)}</b> ${pct(o.risk)}<br><span class="muted" style="font-size:12px">${esc(riskNote(o) || o.state)}${o.payment === "cod" ? " · cash on delivery" : ""}</span></div>
+      ${["planned", "out_for_delivery"].includes(o.state) ? `<button class="pill small dl" title="Simulate the driver delivering">✓</button><button class="pill small fl" title="Simulate a failed delivery">✗</button>` : `<span class="chip">${esc(o.state.replace("_", " "))}</span>`}</div>`).join("");
+  const vanOf = Object.fromEntries((S.plan?.routes || []).flatMap(r => r.stops.map(s => [s.order_id, r.vehicle_id])));
+  $("risk").querySelectorAll(".risk").forEach(row => {
+    const o = S.orders.find(x => x.id === row.dataset.id), body = extra => JSON.stringify({ vehicle_id: vanOf[o.id], location: o.location, ...extra });
+    const dl = row.querySelector(".dl"), fl = row.querySelector(".fl");
+    if (dl) dl.onclick = () => api(`/driver/stops/${o.id}/deliver`, { method: "POST", body: body({}) }).then(() => toast(`Delivered to ${esc(o.customer)}.`)).catch(e => toast(esc(e.message)));
+    if (fl) fl.onclick = async () => {
+      const reason = prompt("What did the driver say? (e.g. “not home, phone switched off”, “refused to pay”)"); if (!reason) return;
+      const RES = { reattempt: "genuine: we'll try again (customer messaged)", rto: "genuine: going back to the warehouse (customer messaged)",
+        disputed: "the driver wasn't at the address: reattempt, not counted", human: "unclear: it's waiting in Needs you" };
+      await api(`/driver/stops/${o.id}/fail`, { method: "POST", body: body({ reason, dwell_s: 180 }) })
+        .then(r => toast(`Failed attempt checked: ${RES[r.result] || esc(r.result)}.`, 8000)).catch(e => toast(esc(e.message)));
+    };
+  });
+}
+async function mlNote() {
+  const m = (await api("/ml/status").catch(() => ({})))["delivery_risk"]; const el = $("mlNote");
+  if (!m || !el) return;
+  el.textContent = m.trained ? "Scored by a model trained on past deliveries."
+    : m.labelled < m.needed ? `Scored by rules until there are ${m.needed} past deliveries to learn from (${m.labelled} so far).`
+    : "Scored by rules: a model trained on past deliveries isn't better yet.";
+}
+async function runTwin() {
+  $("twin").innerHTML = `<div class="muted" style="font-size:12px">Simulating a month…</div>`;
+  const r = await api("/twin/prevention").catch(e => ({ error: e.message }));
+  if (r.error) { $("twin").innerHTML = `<div class="bad">${esc(r.error)}</div>`; return; }
+  const P = r.policies, row = (k, label) => `<tr class="${k === "risk" ? "best" : ""}"><td>${label}</td><td>${pct(P[k].failure_rate)}</td><td>${k === "none" ? "–" : pct(P[k].fewer_failures)}</td><td>${pct(P[k].message_rate)}</td></tr>`;
+  $("twin").innerHTML = `<table class="twin" style="margin-top:8px"><tr><th>${r.days} simulated days</th><th>Failed</th><th>Fewer</th><th>Messaged</th></tr>
+    ${row("none", "No checks")}${row("risk", "Risky only ✓")}${row("everyone", "Ask everyone")}</table>
+    <div class="muted" style="font-size:12px;margin-top:4px">Same customers, same days. Customer behaviour after a message is an assumption (reply rate ${pct(r.assumptions.reply_rate)}), to be replaced by real reply data.</div>`;
+}
+$("twin").innerHTML = `<button class="pill small" id="twinBtn" style="margin-top:8px">🧪 Test on a simulated month</button>`;
+$("twinBtn").onclick = runTwin;
+
+const INTENTS = { confirm: "Confirm delivery", reschedule: "Reschedule (type the new time)", cancel: "Cancel the order",
+  deliver_to_neighbour: "Leave with neighbour (note for driver)", give_directions: "Directions (note for driver)", other: "Other (handle yourself)" };
+function messageCard(m, who, d) {
+  const sug = d?.answers?.intent ? `${esc(d.answers.intent.choice.replaceAll("_", " "))} (${pct(d.answers.intent.confidence)} sure, by ${esc(d.decider)})` : "no AI suggestion";
+  const pre = d?.answers?.intent?.choice || "other";
+  return `<div class="card msg" data-id="${esc(m.message_id)}"><div>💬 <b>${esc(who || "Customer")}</b>: “${esc(m.text)}”</div>
+    <div class="muted" style="font-size:12px">Suggestion: ${sug}</div>
+    <div class="row"><select class="intent">${Object.entries(INTENTS).map(([k, v]) => `<option value="${k}" ${k === pre ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <input class="when" placeholder="new time, e.g. tomorrow 10am" style="flex:1;min-width:120px;background:var(--glass-2);border:1px solid var(--line-strong);border-radius:999px;padding:4px 12px" ${pre === "reschedule" ? "" : "hidden"}>
+      <button class="pill small primary apply">Apply</button></div></div>`;
+}
+function learnChart(hist) {
+  const pts = hist.filter(h => h.delay_error != null).slice(-12);
+  if (!pts.length) return `<div class="empty">After a problem, press <b>▶ Run the day</b>: the system replays the day, sees how wrong its delay guess was, and adjusts. Then start a new demo day and try the same problem again.</div>`;
+  const W = 300, H = 70, max = Math.max(0.3, ...pts.map(p => p.delay_error));
+  const xy = pts.map((p, i) => [pts.length === 1 ? W / 2 : 12 + i * (W - 24) / (pts.length - 1), H - 10 - p.delay_error / max * (H - 26)]);
+  return `<div class="muted" style="font-size:12px">How far off the delay guess was, each day</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Delay guess error per simulated day">
+      <polyline fill="none" stroke="var(--mid)" stroke-width="2.5" points="${xy.map(p => p.join(",")).join(" ")}"/>
+      ${xy.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="3.5" fill="var(--good)"/><text x="${p[0]}" y="${p[1] - 7}" font-size="10" text-anchor="middle" fill="currentColor">${Math.round(pts[i].delay_error * 100)}%</text>`).join("")}
+    </svg>`;
+}
+
+async function renderQueue() {
+  const all = await api("/queue").catch(() => []);
+  const msgs = all.filter(x => x.kind === "message"), items = all.filter(x => x.kind === "incident"), attempts = all.filter(x => x.kind === "attempt");
+  $("qn").innerHTML = all.length ? `<span class="n">${all.length}</span>` : "";
+  const REASONS = { not_home: "Nobody home", refused: "Refused", wrong_address: "Wrong address", unsafe: "Unsafe to reach", other: "Other" };
+  const msgHtml = attempts.map(({ order: o, customer: who, decision: d }) => `<div class="card att" data-id="${esc(o.id)}">
+      <div>❌ <b>Failed delivery to ${esc(who || "customer")}</b>: couldn't check that the driver was really there.</div>
+      <div class="row"><select class="reason">${Object.entries(REASONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
+        <button class="pill small primary yes">Genuine</button><button class="pill small no">Driver wasn't there</button></div></div>`).join("")
+    + msgs.map(x => messageCard(x.message, x.customer, x.decision)).join("");
+  $("q").innerHTML = (msgHtml + (items.length ? items.map(({ incident: i, decision: d }) => {
+    const sug = d?.answers?.kind ? `${d.answers.kind.choice} (${pct(d.answers.kind.confidence)} sure, by ${esc(d.decider)})` : "no AI suggestion";
+    const kinds = ["flood", "traffic", "closure", "breakdown", "other"];
+    const pre = d?.answers?.kind?.choice && kinds.includes(d.answers.kind.choice) ? d.answers.kind.choice : "traffic";
+    return `<div class="card" data-id="${esc(i.id)}"><div>${esc(i.description)}</div>
+      <div class="muted" style="font-size:12px">Suggestion: ${sug}${i.area ? "" : " · no location yet"}</div>
+      <div class="row"><select class="kind">${kinds.map(k => `<option ${k === pre ? "selected" : ""}>${k}</option>`).join("")}</select>
+        <label class="muted" style="font-size:12px">severity <input class="sev" type="range" min="0" max="1" step="0.25" value="0.5"></label></div>
+      <div class="row"><button class="pill small pick">📍 Pick location</button><button class="pill small primary act">Activate</button><button class="pill small rej">Not real</button>
+        <button class="pill small retry" title="Ask the AI to triage this again">🤖 Ask AI again</button></div></div>`;
+  }).join("") : "")) || `<div class="empty">Nothing waiting. Reports and customer replies the AI can't decide on with confidence show up here.</div>`;
+  $("q").querySelectorAll(".card.att").forEach(card => {
+    const go = genuine => api(`/orders/${card.dataset.id}/attempt/resolve`, { method: "POST", body: JSON.stringify({ genuine, reason: card.querySelector(".reason").value, by: "ops" }) })
+      .then(r => toast(`Done: ${esc(r.result)}.`)).catch(e => toast(`Couldn't apply: ${esc(e.message)}`));
+    card.querySelector(".yes").onclick = () => go(true);
+    card.querySelector(".no").onclick = () => go(false);
+  });
+  $("q").querySelectorAll(".card.msg").forEach(card => {
+    const intent = card.querySelector(".intent"), when = card.querySelector(".when");
+    intent.onchange = () => when.hidden = intent.value !== "reschedule";
+    card.querySelector(".apply").onclick = () => api(`/messages/${card.dataset.id}/resolve`, { method: "POST",
+        body: JSON.stringify({ by: "ops", intent: intent.value, ...(intent.value === "reschedule" && when.value.trim() ? { when: when.value.trim() } : {}) }) })
+      .then(r => toast(r.when ? `Done: rescheduled to ${esc(r.when)}.` : `Done: ${esc(r.result.replaceAll("_", " "))}.`)).catch(e => toast(`Couldn't apply: ${esc(e.message)}`));
+  });
+  $("q").querySelectorAll(".card:not(.msg):not(.att)").forEach(card => {
+    const id = card.dataset.id; let area = null;
+    card.querySelector(".pick").onclick = () => { picking = ll => { area = { kind: "circle", center: { lat: ll.lat, lng: ll.lng }, radius_m: 1500 };
+      card.querySelector(".pick").textContent = "📍 Location set"; }; document.body.classList.add("picking"); toast("Click the map where the problem is."); };
+    const resolve = active => api(`/incidents/${id}/resolve`, { method: "POST", body: JSON.stringify({ by: "ops", kind: card.querySelector(".kind").value,
+        severity: +card.querySelector(".sev").value, active, ...(area ? { area } : {}) }) })
+      .then(r => toast(r.result === "needs_location" ? "Pick a location on the map first." : r.result === "needs_vehicle" ? "Report the breakdown again with a van selected." : `Done: ${esc(r.result)}.`))
+      .catch(e => toast(`Couldn't resolve: ${esc(e.message)}`));
+    card.querySelector(".retry").onclick = () => api(`/incidents/${id}/triage`, { method: "POST" })
+      .then(r => toast(r.result === "human" ? "The AI still isn't sure (or isn't reachable): it stays here." : `Done: ${esc(r.result)}.`))
+      .catch(e => toast(`Couldn't ask: ${esc(e.message)}`));
+    card.querySelector(".act").onclick = () => resolve(true);
+    card.querySelector(".rej").onclick = () => resolve(false);
+  });
+}
+
+async function renderMessages() {
+  const ms = await api("/messages?limit=80").catch(() => []);
+  $("cust").innerHTML = ms.length ? ms.map(m => `<div class="ev"><span class="t">${clock(m.ts)}</span><div style="flex:1">
+      <b>${m.direction === "out" ? "✉️ To" : "💬 From"} ${esc(m.customer || "customer")}</b><br><span class="muted">${esc(m.text)}</span>
+      ${m.direction === "out" ? `<div><button class="pill small sim" data-c="${esc(m.customer_id)}" data-o="${esc(m.order_id || "")}" style="margin-top:4px">↩ Simulate reply</button></div>` : ""}</div></div>`).join("")
+    : `<div class="empty">No messages yet. Customers get one when a problem changes their delivery time.</div>`;
+  $("cust").querySelectorAll(".sim").forEach(b => b.onclick = async () => {
+    const text = prompt("Reply as the customer (e.g. 1, 3, “come after 6 pm”, “blue gate near the temple”):");
+    if (!text) return;
+    await api("/webhooks/messages", { method: "POST", body: JSON.stringify({ customer_id: b.dataset.c, ...(b.dataset.o ? { order_id: b.dataset.o } : {}), text, channel: "sim" }) })
+      .then(() => toast("Reply received: working out what it means…")).catch(e => toast(`Couldn't send: ${esc(e.message)}`));
+  });
+}
+
+const decSummary = d => { const a = d.answers || {};
+  const x = a.kind?.choice || a.intent?.choice || (a.will_fail ? `risk level ${Math.round(a.will_fail.score * 4) + 1}/5` : "")
+    || (a.genuine ? (a.genuine.p >= .5 ? `genuine, ${a.reason?.choice?.replace("_", " ")}` : "not genuine") : "");
+  return x ? `${esc(x)} · ` : ""; };
+async function renderDecisions() {
+  const ds = await api("/decisions?limit=40").catch(() => []);
+  $("dec").innerHTML = ds.length ? ds.map(d => `<div class="ev"><span class="t">${clock(d.ts)}</span><div><b>${esc(d.type.replace("_", " "))}</b> · ${esc(d.decider)}
+    <span class="chip" style="margin-left:4px">${esc(d.route)}</span><br><span class="muted">${decSummary(d)}confidence ${pct(d.confidence)}${d.method ? ` · ${esc(d.method)}` : ""}</span></div></div>`).join("")
+    : `<div class="empty">No decisions yet.</div>`;
+}
+
+/* ---------------- activity feed (plain words) ---------------- */
+const feed = [];
+function describe(ev) {
+  const p = ev.payload || {};
+  switch (ev.type) {
+    case "plan.applied": return "🗺️ New routes applied";
+    case "incident.reported": return `⚠️ Problem reported: “${esc(p.incident?.description)}”`;
+    case "incident.triaged": return p.incident?.state === "active" ? `🚧 Now handling: ${esc(p.incident.kind)}${p.incident.area ? "" : ""} (roads ~${(+p.incident.slowdown).toFixed(1)}× slower)` : `✅ Not treated as a real problem: “${esc(p.incident?.description)}”`;
+    case "incident.closed": return "✅ Problem over: routes re-checked";
+    case "decision.made": { const d = p.decision || {}; if (d.type === "delivery_risk") return null; return d.type === "plan_select" ? `🧮 Compared 3 plans: ${d.action?.kind === "hold" ? "kept current" : "switched"}`
+      : `🤖 ${esc(d.type?.replace("_", " "))} by ${esc(d.decider)}: ${d.route === "human" ? "needs a person" : esc(d.route)}`; }
+    case "stop.delivered": return "📦 Delivered";
+    case "stop.failed": return `❌ Delivery failed: ${esc(p.reason)}`;
+    case "message.received": return `💬 Customer replied: “${esc(p.text)}”`;
+    case "message.sent": return `✉️ Messaged a customer: “${esc(p.text)}”`;
+    case "day.simulated": return p.delay_error == null ? "📈 Day replayed: nothing new to learn" : `📈 Day replayed: delay guess off by ${Math.round(p.delay_error * 100)}%; learned ${Object.entries(p.changes || {}).map(([k, [a, b]]) => `${esc(k)} ×${(+a).toFixed(2)}→×${(+b).toFixed(2)}`).join(", ")}`;
+    case "order.noted": return `📝 Note for the driver: ${esc(p.note)}`;
+    case "order.risk_scored": return p.confirm ? `🛡️ Risky delivery (${pct(p.risk)} chance of failing): asking the customer to confirm` : null;
+    case "order.rescheduled": return `🗓️ Delivery moved to the customer's new time`;
+    case "order.attempt_checked": return `🔎 Failed attempt checked: ${p.genuine ? `genuine (${esc(p.reason.replace("_", " "))})` : "driver not at the address"} → ${{ reattempt: "try again", rto: "return to warehouse", disputed: "try again, not counted" }[p.result] || esc(p.result)}`;
+    default: return null;
+  }
+}
+function pushEvent(ev) {
+  const text = describe(ev); if (!text) return;
+  feed.unshift(`<div class="ev"><span class="t">${clock(ev.ts)}</span><div>${text}</div></div>`);
+  feed.length = Math.min(feed.length, 80);
+  $("act").innerHTML = feed.join("");
+  if (ev.type === "incident.triaged") toast(text);
+}
+
+/* ---------------- data flow ---------------- */
+let pending = null;
+async function refresh() {
+  try { S = await api("/state"); render(); renderQueue(); renderMessages(); renderDecisions(); mlNote(); }
+  catch (e) { $("hint").innerHTML = `<span class="bad">Can't reach the API at ${esc(API)}.</span> Start everything with <span class="mono">python run.py</span>.`; }
+}
+const soon = () => { clearTimeout(pending); pending = setTimeout(refresh, 250); };
+function listen() {
+  const from = Math.max(0, (S?.last_seq || 0) - 40);     // replay recent history into the feed, then go live
+  const es = new EventSource(`${API}/stream?after=${from}`);
+  es.onmessage = e => { try { pushEvent(JSON.parse(e.data)); } catch {} soon(); };
+  ["plan.applied", "incident.reported", "incident.triaged", "incident.closed", "decision.made", "stop.delivered", "stop.failed", "message.received",
+   "order.created", "order.state_changed", "policy.updated", "message.sent", "order.noted", "day.simulated",
+   "order.risk_scored", "order.confirm_requested", "order.attempt_checked", "order.replied", "order.rescheduled"].forEach(t => es.addEventListener(t, es.onmessage));
+  es.onerror = () => {};                                   // EventSource reconnects by itself (resumes via Last-Event-ID)
+}
+$("planBtn").onclick = async () => {
+  $("planBtn").disabled = true;
+  try { const r = await api(`/plan/run?depot_id=${S.depot.id}&reason=ops`, { method: "POST" });
+    toast(r.verdict === "apply" ? `Routes planned in ${(r.timings_ms.total / 1000).toFixed(1)} s.` : "Kept the current routes: nothing better found."); }
+  catch (e) { toast(`Couldn't plan: ${esc(e.message)}`); }
+  $("planBtn").disabled = false;
+};
+$("riskBtn").onclick = async () => {
+  $("riskBtn").disabled = true;
+  try { const r = await api(`/prevention/run?depot_id=${S.depot.id}`, { method: "POST" });
+    const risky = r.scored.filter(x => x.risky).length;
+    toast(`Checked ${r.scored.length} deliveries: ${risky} look risky${r.messaged ? `, ${r.messaged} customer${r.messaged > 1 ? "s" : ""} asked to confirm` : ""}.${r.planned_first ? " Planned the routes first, for arrival times." : ""}`, 8000); }
+  catch (e) { toast(`Couldn't check: ${esc(e.message)}`); }
+  $("riskBtn").disabled = false;
+};
+$("report").onsubmit = async e => {
+  e.preventDefault();
+  const text = $("text").value.trim(); if (!text) return;
+  $("send").disabled = true;
+  try { await api("/incidents", { method: "POST", body: JSON.stringify({ description: text, source: "ops", ...($("van").value ? { vehicle_id: $("van").value } : {}) }) });
+    $("text").value = ""; toast(S.llm ? "Got it. Working out what it is and where…" : "Saved. No AI key, so it's waiting in Needs you."); }
+  catch (err) { toast(`Couldn't report: ${esc(err.message)}`); }
+  $("send").disabled = false;
+};
+$("dayBtn").onclick = async () => {
+  $("dayBtn").disabled = true;
+  try { const r = await api(`/day/run?depot_id=${S.depot.id}`, { method: "POST" });
+    const ch = Object.entries(r.changes).map(([k, [a, b]]) => `${esc(k)} ×${a.toFixed(2)} → ×${b.toFixed(2)}`).join(", ");
+    toast(r.delay_error == null ? "Day replayed: no problems today, so nothing new to learn."
+      : `Day replayed: the delay guess was off by ${Math.round(r.delay_error * 100)}%. Learned: ${ch}${r.rolled_back.length ? " (rolled back: getting worse)" : ""}.`, 9000); }
+  catch (e) { toast(`Couldn't run the day: ${esc(e.message)}`); }
+  $("dayBtn").disabled = false;
+};
+$("resetBtn").onclick = async () => { if (!confirm("Start a fresh demo day? What the system learned is kept.")) return;
+  await api("/demo/reset", { method: "POST" }).catch(e => toast(esc(e.message))); feed.length = 0; $("act").innerHTML = ""; fitted = false; refresh(); };
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === t));
+  ["act", "q", "cust", "dec"].forEach(id => $(id).hidden = id !== t.dataset.t);
+});
+
+/* ---------------- chat with the dispatcher (POST /chat, streamed steps) ---------------- */
+const STEP = { get_overview: "👀 Looking at today", plan_routes: "🗺️ Planning routes", report_problem: "⚠️ Handling the problem",
+  list_waiting: "📋 Checking what waits for you", resolve_problem: "✅ Applying your decision", run_the_day: "📈 Replaying the day",
+  customer_messages: "💬 Reading customer messages", check_risky_deliveries: "🛡️ Checking risky deliveries", find_delivery: "🔎 Finding the delivery" };
+let chatSid = "c" + Date.now(), chatBusy = false;
+const msgs = $("msgs");
+const bubble = (cls, text) => { const d = document.createElement("div"); d.className = cls; d.textContent = text; msgs.appendChild(d); msgs.scrollTop = msgs.scrollHeight; return d; };
+const greet = () => bubble("m bot", "Hi! Ask me how today is going, where a parcel is, or tell me about a problem on the roads in your own words.");
+greet();
+$("fab").onclick = () => { document.body.classList.add("chat-open"); $("chatIn").focus(); };
+$("chatClose").onclick = () => document.body.classList.remove("chat-open");
+$("chatNew").onclick = () => { if (chatBusy) return; chatSid = "c" + Date.now(); msgs.innerHTML = ""; greet(); };
+$("chatForm").onsubmit = async e => {
+  e.preventDefault();
+  const text = $("chatIn").value.trim(); if (!text || chatBusy) return;
+  chatBusy = true; $("chatSend").disabled = true; $("chatIn").value = "";
+  bubble("m me", text);
+  const steps = {};
+  try {
+    const res = await fetch(`${API}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: chatSid, text }) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rd = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { done, value } = await rd.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const line = buf.slice(0, i).replace(/^data: ?/, ""); buf = buf.slice(i + 2);
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "tool_call") steps[ev.name] = bubble("step", STEP[ev.name] || ev.name);
+        else if (ev.type === "tool_result") { const s = steps[ev.name] || bubble("step", STEP[ev.name] || ev.name); s.className = "step " + (ev.ok ? "ok" : "bad"); s.title = ev.summary; }
+        else if (ev.type === "text") bubble("m bot", ev.text);
+        else if (ev.type === "error") bubble("m err", ev.message);
+      }
+    }
+  } catch (err) { bubble("m err", `Couldn't reach the dispatcher: ${err.message}`); }
+  chatBusy = false; $("chatSend").disabled = false; $("chatIn").focus();
+};
+
+/* ---------------- Gemini key dialog (served by run.py at /api/key*) ---------------- */
+$("keyLater").onclick = () => $("keyDlg").classList.remove("show");
+$("keyForm").onsubmit = async e => {
+  e.preventDefault(); const key = $("keyInput").value.trim(); if (!key) return;
+  $("keyMsg").textContent = "Checking the key with Google…";
+  try { const r = await fetch("/api/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) });
+    const j = await r.json(); if (!r.ok || !j.ok) { $("keyMsg").textContent = j.message || "Couldn't save the key."; return; }
+    $("keyInput").value = ""; $("keyMsg").textContent = "Saved. Restarting the API…";
+    for (let i = 0; i < 80; i++) { await new Promise(r => setTimeout(r, 500)); const st = await fetch("/api/key-status").then(x => x.json()).catch(() => null); if (st?.has_key && st.agent_ready) break; }
+    $("keyDlg").classList.remove("show"); refresh();
+  } catch { $("keyMsg").textContent = "Couldn't reach run.py."; }
+};
+fetch("/api/key-status").then(r => r.ok ? r.json() : null).then(st => { if (st && !st.has_key) $("keyDlg").classList.add("show"); }).catch(() => {});
+
+if (q.get("tab")) document.querySelector(`.tab[data-t="${q.get("tab")}"]`)?.click();   // ?tab=q|cust|dec
+refresh().then(() => { if (!q.get("nostream")) listen(); });   // ?nostream=1 for screenshots and tests
+</script>
+</body>
+</html>

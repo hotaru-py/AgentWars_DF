@@ -1,0 +1,30 @@
+# Dispatch v2 local stack (spec §3.2). Start: docker compose -f infra/docker-compose.yml up -d
+# OSRM needs its data prepared once first: python infra/prepare_osrm.py   (see infra/README.md)
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: dispatch
+      POSTGRES_PASSWORD: dispatch          # local development only
+      POSTGRES_DB: dispatch
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dispatch -d dispatch"]
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6379:6379"]
+
+  osrm:
+    image: osrm/osrm-backend:v5.25.0
+    command: osrm-routed --algorithm mld --max-table-size 2000 /data/region.osrm
+    ports: ["127.0.0.1:5000:5000"]
+    volumes: ["./osrm-data:/data"]
+    profiles: ["osrm"]                     # opt-in: docker compose --profile osrm up -d (needs prepared data)
+
+volumes:
+  pgdata:
