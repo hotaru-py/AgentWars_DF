@@ -1,34 +1,58 @@
-# LookAtDisPatch: last-mile delivery operations for Chennai
+# LookAtDisPatch: Agentic last-mile delivery ops optimization
 
-LookAtDisPatch runs a delivery fleet's day. It plans routes on real roads and reads problem reports
-written in plain words ("waterlogging at Velachery", "V2 has a puncture"). It re-plans around those
-problems, messages the customers affected and handles their replies. Before the vans leave, it
-spots deliveries likely to fail and asks those customers to confirm. It also replays each day to
-learn how much floods and traffic really slow the vans.
+LookAtDisPatch is a dispatch system for a last-mile delivery fleet, built around a demo depot in
+Chennai. It plans van routes on the real road network, accepts problem reports written in natural
+language (for example "waterlogging at Velachery" or "V2 has a puncture"), re-plans around them,
+notifies affected customers and processes their replies. It also estimates which deliveries are
+likely to fail before dispatch, and replays each day in a simulator to improve its delay estimates.
 
-Code owns every number. Routes, arrival times, plan scores and risk scores come from a solver and
-deterministic code. AI makes the judgement calls, such as what a report means, how severe it is and
-what a customer's reply wants. Each judgement goes through a **confidence gate**: the system acts on
-a confident answer, sends a less certain one to a person, and records every decision in a ledger.
+Numeric work (routing, arrival times, plan scoring, risk scores) is done by an optimizer and
+deterministic code. A language model is used only to interpret free text, and each of its answers
+carries a calibrated confidence that decides whether the system acts on it or hands it to a person.
 
 ![Play a day: a scripted day in Chennai, from planning to learning](docs/img/play-a-day.gif)
 
-_▶ Play a day, in about a minute: routes planned on real roads, risky customers asked to confirm, their
-replies handled, a flood in Adyar driven around (old routes dashed), a van breakdown, failed deliveries
-checked, and the day replayed to learn. It runs with no API key._
+_The built-in demo ("Play a day"), which runs without an API key: route planning, a risk check,
+customer replies, a flood in Adyar (previous routes dashed), a van breakdown, failed delivery
+attempts, and the end-of-day replay._
 
-The design is in [specs/v2-spec.md](specs/v2-spec.md); what's left is in [specs/roadmap.md](specs/roadmap.md).
+## Features
 
-## Quick start
+- **Route planning** with Google OR-Tools on an OSRM road-distance matrix: time windows, van
+  capacity and driver shifts. Three strategies (balanced, deadline-first, compact) are solved and
+  scored, and the best plan is applied only if it improves on the current one.
+- **Incident handling.** Free-text reports are classified (flood, traffic, closure, breakdown, other,
+  or not an incident), located using a Chennai place gazetteer, and turned into a slowdown zone.
+  Affected routes are re-planned and go around the zone when that is faster.
+- **Customer messaging** (simulated). Customers whose arrival time changes are notified. Replies are
+  classified as confirm, cancel, reschedule, directions or "leave with neighbour", and acted on.
+  Requested times such as "after 6 pm" or "tomorrow morning" are parsed and applied.
+- **Failed-delivery prevention.** Each order gets a probability of failure based on the customer's
+  delivery history, cash on delivery, order value and address quality. High-risk customers are
+  asked to confirm. Failed attempts are checked against the driver's GPS position and time at the
+  door before the order is rescheduled or returned to the warehouse.
+- **Confidence-gated decisions.** Every decision (rules, trained model, LLM or a person) is recorded
+  in a ledger with its inputs, answer, confidence and outcome.
+- **Simulation.** A digital twin replays the day with hidden "true" slowdowns. The planner's delay
+  factors are adjusted from the difference.
+- **Operations console** (map, fleet, plan comparison, activity feed, decision ledger) and a chat
+  assistant that can answer questions and take actions through the same services.
 
-You need **Python 3.10 or newer**. Both of these are optional:
+**Stack:** Python 3.10+, FastAPI, SQLAlchemy (Postgres or SQLite), OR-Tools, OSRM, Google ADK with
+Gemini, NumPy, Leaflet. Optional: TypeSafe Jev as an additional decision provider.
 
-- **Docker Desktop** gives you Postgres and real road routing (OSRM). Without it, LookAtDisPatch runs
-  on a local SQLite file with straight-line distances.
-- **A Gemini API key** lets problem reports and customer replies be handled automatically, and
-  enables the chat. Without one, they wait for a person.
+## Getting started
 
-**1. Install (once)**
+### Requirements
+
+- Python 3.10 or newer.
+- Optional: Docker Desktop, for Postgres and road routing with OSRM. Without Docker the app uses a
+  local SQLite file and straight-line distances.
+- Optional: a Gemini API key, for automatic triage of reports and replies, and for the chat
+  assistant. Without a key, those items go to a manual review queue. The demo still runs, using
+  recorded answers.
+
+### Install
 
 ```powershell
 # Windows (PowerShell)
@@ -43,105 +67,72 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-For real roads, build the Chennai road network once. This needs Docker and downloads about 550 MB:
+To use real road distances, build the Chennai road network once. This requires Docker and downloads
+about 550 MB:
 
 ```bash
 python infra/prepare_osrm.py
 ```
 
-**2. Start**
+### Run
 
 ```bash
-python run.py              # python3 on macOS / Linux
+python run.py            # use python3 on macOS / Linux
 ```
 
-`run.py` uses the project's `.venv` by itself and does the following:
+`run.py` re-launches itself inside `.venv` if needed, then:
 
-1. Starts the Docker services if Docker is installed.
-2. Loads the Chennai demo (Guindy depot, 3 vans, 10 orders) into an empty database.
-3. Starts the API at http://127.0.0.1:8080 (interactive docs at `/docs`).
-4. Opens the console at http://127.0.0.1:8001/console.html.
+1. starts the Docker services (Postgres, Redis, OSRM) if Docker is available,
+2. loads the demo data (Guindy depot, 3 vans, 10 orders) into an empty database,
+3. starts the API on http://127.0.0.1:8080 (OpenAPI docs at `/docs`),
+4. serves the console on http://127.0.0.1:8001/console.html and opens it in the browser.
 
-Stop with **Ctrl+C**.
+Stop it with Ctrl+C.
 
-| Option        | Effect                                                                                                               |
-| ------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `--fresh`     | Wipe the database and load a fresh demo day, forgetting what was learned (the console's **↺ New demo day** keeps it) |
-| `--no-docker` | SQLite and straight-line routing, even if Docker is installed                                                        |
-| `--no-open`   | Don't open a browser tab                                                                                             |
+| Option        | Effect                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| `--fresh`     | Reset the database and load a new demo day, discarding learned delay factors               |
+| `--no-docker` | Use SQLite and straight-line routing even if Docker is installed                           |
+| `--no-open`   | Do not open a browser tab                                                                  |
 
-The environment variables `API_PORT`, `UI_PORT` and `DATABASE_URL` override the defaults.
+`API_PORT`, `UI_PORT` and `DATABASE_URL` can be set as environment variables.
 
-**No Gemini key yet?** The console offers a **Connect Gemini** box. It checks the key with Google,
-saves it to `.env` in the repo root and restarts the API. A key set as a system environment variable
-also works. Other settings, including the optional TypeSafe Jev key and the risk threshold, are
-listed in [.env.example](.env.example).
+### Configuration
 
-## Try it
+Settings are read from `.env` in the repository root (see [.env.example](.env.example)); real
+environment variables take precedence. If no Gemini key is set, the console shows a dialog that
+validates a key and saves it to `.env`. Other settings include the model name (`GEMINI_MODEL`), the
+optional TypeSafe key, the risk threshold for confirmation messages and the maximum number of
+delivery attempts.
 
-| Do this                                                                                                                                                               | What you should see                                                                                                                                                                                                                                                                                                                                                                                                            |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Click **▶ Play a day** (bottom bar)                                                                                                                                   | A whole scripted day in about a minute, no key needed: routes planned, risky customers asked to confirm, replies handled (confirm, a new time, directions, a cancellation), vans delivering, a flood in Adyar driven around (old routes dashed), a breakdown whose stops move to other vans, failed attempts checked, and the day replayed to learn. Follow it in **Activity**, then read the message threads in **Customers** |
-| Click **Plan routes**                                                                                                                                                 | Coloured van routes on real streets, key numbers, each van's stops with arrival times, and the 3 plans compared                                                                                                                                                                                                                                                                                                                |
-| Click **Check risky deliveries**                                                                                                                                      | Each delivery gets a chance of failing, from the customer's history, cash on delivery and address quality. Five demo customers look risky and get a "please confirm" message. The **Failed-delivery prevention** panel lists them, and their stops show (the driver calls first) until they reply                                                                                                                              |
-| In that list, click **✗** on a delivery and type what the driver said (_"not home"_, _"refused to pay"_)                                                              | The attempt is checked: was the driver at the address, and for long enough? _Not home_ → another try, and the customer is messaged. A refused cash-on-delivery parcel goes back. Unclear attempts wait in **Needs you**. **✓** marks a delivery done                                                                                                                                                                           |
-| Click **Test on a simulated month**                                                                                                                                   | Failed deliveries with no checks, with only risky customers asked, and with everyone asked                                                                                                                                                                                                                                                                                                                                     |
-| Type a problem, e.g. _"CM convoy causing heavy traffic in Tambaram"_, then **Report**                                                                                 | The AI works out what and where it is, a zone appears on the map, and the routes are re-planned. Without a key, or if the AI isn't sure, it waits in **Needs you**                                                                                                                                                                                                                                                             |
-| Open **Needs you**                                                                                                                                                    | Each waiting report with the AI's suggestion. Pick the kind and severity, **Pick location** on the map if needed, then **Activate** or **Not real**. **Ask AI again** retries the AI                                                                                                                                                                                                                                           |
-| In the **Van** list next to the report box, pick _V2 · Farhan broke down_ and report _"puncture, can't continue"_                                                     | That van goes off the road and its stops move to the others                                                                                                                                                                                                                                                                                                                                                                    |
-| After a re-plan, open **Customers**                                                                                                                                   | Each affected customer got a short message with their new arrival time                                                                                                                                                                                                                                                                                                                                                         |
-| Click **↩ Simulate reply** on a message and type `3`                                                                                                                  | The order is cancelled, the customer is told and the routes are re-planned. Replies of 1/2/3 or yes/ok need no AI                                                                                                                                                                                                                                                                                                              |
-| Simulate a reply like _"blue gate near the temple"_ or _"can you come tomorrow morning"_                                                                              | Directions become a note for the driver. A new time is read from the reply ("after 6 pm", "4-6pm", "tomorrow morning"): the delivery moves, the customer is told, and the routes are re-planned. A vague one (_"some other time"_) waits in **Needs you**, where you can type the time. Telling directions from reschedules apart needs the AI (a key with quota)                                                              |
-| After a problem, click **▶ Run the day**                                                                                                                              | The day is replayed against the "real" slowdowns. You see how far off the delay guess was, and the system adjusts. **↺ New demo day** keeps what it learned, so repeat the same problem and the error shrinks (about 26% → 14% → 6%)                                                                                                                                                                                           |
-| Click **Chat** (bottom right) and ask _"how's today going?"_, _"which deliveries might fail?"_, _"any failed deliveries?"_, _"show me a demo"_, or describe a problem | The dispatcher answers in plain words and acts, showing each step. Needs a Gemini key with quota                                                                                                                                                                                                                                                                                                                               |
-| Open **Decisions**                                                                                                                                                    | Every decision: who made it (rules, AI or a person), how confident it was, and what happened                                                                                                                                                                                                                                                                                                                                   |
+## Using the console
 
-| After a played day: the activity feed and map       | Each customer's message thread                      |
-| --------------------------------------------------- | --------------------------------------------------- |
+The quickest overview is **▶ Play a day** in the bottom bar. It resets the demo and runs a scripted
+day in about a minute. Progress is shown in the **Activity** tab and the message history in
+**Customers**.
+
+To explore manually:
+
+| Action | Result |
+| ------ | ------ |
+| **Plan routes** | Routes are drawn on the map. The fleet panel lists each van's stops and arrival times, and the three candidate plans are compared |
+| **Check risky deliveries** | Each order is scored. In the demo data, five customers are above the threshold and receive a confirmation request. Until they reply, their stops are marked "call" for the driver |
+| Report a problem, e.g. _"CM convoy causing heavy traffic in Tambaram"_ | The report is classified and placed on the map, and routes are re-planned. Reports the system cannot classify confidently (or all reports, without an API key) appear under **Needs you** |
+| Select a van in the **Van** list, then report _"puncture, can't continue"_ | The van is taken off the road and its stops are reassigned |
+| **↩ Simulate reply** in **Customers**, e.g. `3`, _"after 6 pm"_ or _"blue gate near the temple"_ | Cancels the order, reschedules it, or adds a note for the driver, respectively. Numeric replies and times are handled without the language model |
+| **✗** next to an order in the prevention panel | Simulates a failed attempt. It is verified and then rescheduled, returned, or queued for review |
+| **▶ Run the day** after an incident | Replays the day in the simulator and updates the delay factors. Repeating the same incident on new demo days reduces the prediction error (about 26% → 14% → 6%) |
+| **Test on a simulated month** | Compares failure rates with no confirmations, confirmations for high-risk orders only, and confirmations for all orders |
+| **Decisions** tab | Lists each decision with its source (rules, model, LLM or person), confidence and outcome |
+| Chat button (bottom right) | Questions such as _"how's today going?"_ or _"any failed deliveries?"_, or a problem description. Requires a Gemini key with available quota |
+
+| After a played day | Customer message threads |
+| ------------------ | ------------------------ |
 | ![Console after a played day](docs/img/console.jpg) | ![Customer message threads](docs/img/customers.jpg) |
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A[Plan routes<br/>OR-Tools, 3 strategies] --> P[Score delivery risk<br/>confirm risky orders]
-    P --> B[Problem reported<br/>in plain words]
-    B --> C[Triage<br/>AI + confidence gate<br/>or a person]
-    C --> D[Re-plan around it]
-    D --> E[Message affected<br/>customers, handle replies]
-    E --> X[Check failed attempts<br/>reattempt or return]
-    X --> F[Replay the day<br/>in the digital twin]
-    F --> G[Learn the real<br/>slowdowns]
-    G -. next day .-> A
-```
-
-1. **Plan.** OR-Tools solves the vehicle-routing problem three ways (balanced, deadline-first and
-   compact) on an OSRM road matrix. It respects time windows, van capacity and driver shifts. A
-   critic scores each candidate and applies the best, or keeps the current routes if none is better.
-2. **Prevent.** Every open delivery gets a chance of failing. The score starts from the order
-   (cash on delivery, value, address quality, reattempt) and is updated with the customer's own
-   delivery record. Risky customers are asked to confirm. An unconfirmed stop is planned no
-   earlier than the time we told the customer, and the driver calls ahead. A customer who replies
-   with a new time gets it. A model trained on past deliveries takes over from the scoring rules
-   only once it ranks risky deliveries better than they do on recent outcomes.
-3. **Sense.** Problems come in as free text from the console, the chat or the API.
-4. **Decide.** Each judgement goes through a chain of decision providers: rules, then an LLM, then
-   the optional TypeSafe Jev, then a person. The answers are typed: for a problem report, what kind
-   it is, how severe, and whether it's credible. Probabilities come from token logprobs or from
-   repeated sampling, never from the model's own stated confidence. Each answer is calibrated, then
-   gated: _act_, _review_ or _human_.
-5. **Act.** The problem's area is slowed in the road matrix and the open stops are re-planned.
-   Customers whose arrival time moves get a short message. Their replies (confirm, cancel,
-   directions, reschedule) are triaged the same way.
-6. **Check failures.** A failed attempt is checked against the driver's GPS distance from the
-   address and their time at the door. A genuine failure means another try, or a return to the
-   warehouse after 3 tries or a refused cash-on-delivery parcel. If the driver wasn't there, the
-   attempt doesn't count against the customer.
-7. **Learn.** The digital twin replays the day with hidden "true" slowdowns. The learner moves each
-   delay factor halfway toward what it observed. Each update is capped at ±25%, and a factor rolls
-   back if its error grows twice in a row.
-
-## Architecture
+### Architecture
 
 ```mermaid
 flowchart LR
@@ -182,119 +173,148 @@ flowchart LR
     DB --> SSE
 ```
 
-Every change is an event in an append-only log, so the console, the chat and the twin all see the same
-history. The agent's tools call the same services the REST endpoints do, never the database directly.
+All state changes are written as events to an append-only log. The console receives them over
+Server-Sent Events. The chat agent's tools call the same service layer as the REST API, so both see
+the same data.
 
-## Design decisions
+### Planning and re-planning
 
-- **Code owns the numbers, AI owns the judgement calls.** Routes, arrival times, plan scores, risk
-  scores and learned slowdowns come from deterministic code. The AI answers typed questions (which
-  kind of problem? how severe? what does this reply want?) and never computes a time or a distance.
-- **Confidence gates, not blind trust.** Every judgement carries a probability from token logprobs or
-  repeated sampling, never the model's own stated confidence. It's calibrated against past outcomes, then
-  gated: act, act but flag for review, or hand to a person. Irreversible actions (cancelling an order,
-  counting a failed delivery against a customer) need more confidence than reversible ones.
-- **Cheapest provider first.** A chain such as `rules → llm → human` lets plain code settle the easy
-  cases ("1", "yes", "after 6 pm", a GPS fix 30 m from the door) for free. The LLM only sees what rules can't read.
-- **A trained model has to earn its place.** The risk score's `ml` provider goes live only after it
-  beats the hand-written rules on the newest outcomes. On the simulator it usually doesn't, so the rules
-  stay in charge; the check exists so that real data can change that safely.
-- **Honest simulation.** The twin's customer behaviour and "true" slowdowns are stated assumptions, kept
-  separate from the policy being tested, and comparisons reuse the same random draws. Numbers from it are
-  labelled as simulated.
-- **Everything is a ledger row.** Each decision records its inputs, answers, confidence, gate and route, so
-  any automatic action can be audited, overridden, and later used as training data.
+The planner builds a travel-time matrix from OSRM and applies active incidents to it: the time of
+each leg is multiplied in proportion to how much of the leg lies inside an incident zone. For each
+zone, eight points on a ring just outside it are added as possible detour waypoints. A leg uses a
+detour when that is at least 2% faster than driving through. OR-Tools solves the routing problem
+with three cost profiles, and a scoring function compares the results against the current plan.
+
+### Decisions
+
+Each type of decision (incident triage, reply intent, reschedule time, delivery risk, failed-attempt
+verification) has a list of providers that are tried in order, for example
+`rules → llm → human`:
+
+- **Rules** settle unambiguous cases at no cost: a reply of "1" or "yes", a parseable time, a driver
+  who was within 150 m of the address for at least a minute.
+- **The LLM** answers typed questions (a choice from a fixed list, a score, or yes/no). Probabilities
+  come from token log-probabilities, or from repeated sampling if log-probabilities are not
+  available, rather than from the model's own estimate of its confidence.
+- **A trained model** (`ml`) is available for delivery risk and failed-attempt verification. It is
+  used only once it has enough labelled outcomes and outperforms the rules on the most recent ones.
+- **A person** receives anything that remains, through the **Needs you** queue.
+
+Confidences are calibrated against recorded outcomes (isotonic regression once 200 outcomes exist)
+and compared with per-decision thresholds. The result is to act, to act and flag the decision for
+review, or to send it to a person. Decisions that cannot be undone, such as cancelling an order,
+require higher confidence.
+
+### Failed-delivery prevention
+
+The risk score combines a prior based on the order (cash on delivery, order value, address quality,
+whether it is a reattempt) with the customer's own delivery record (Beta-binomial smoothing). Orders
+above the threshold get a confirmation message. Until the customer replies, their stop is not
+scheduled earlier than the time given in the message. After a failed attempt, the driver's distance
+from the address and the time spent there decide whether the attempt counts. A genuine failure
+leads to a reattempt, or to a return after three attempts or a refused cash-on-delivery parcel.
+
+### Learning from the simulated day
+
+The twin replays the executed plan with a hidden "true" slowdown for each incident type. The learner
+moves each delay factor halfway towards the observed value, limits each change to ±25%, and reverts
+a factor if its error increases on two consecutive days.
 
 ![Decision ledger](docs/img/decisions.jpg)
 
-## Measured (demo data and the digital twin)
+## Results
 
-|                                      | Day 1 | Day 2 | Day 3 |
-| ------------------------------------ | ----- | ----- | ----- |
-| Delay-prediction error after a flood | 25.8% | 13.9% | 6.1%  |
+These figures come from the demo data and the simulator, not from a real fleet.
 
-| Failed deliveries over 30 simulated days (mean of 5 seeds) | No checks | Risky only           | Ask everyone     |
-| ---------------------------------------------------------- | --------- | -------------------- | ---------------- |
-| Failure rate                                               | ~17%      | ~12% (**28% fewer**) | ~10% (41% fewer) |
-| Customers messaged                                         | 0%        | 47%                  | 100%             |
+| | Day 1 | Day 2 | Day 3 |
+| --- | --- | --- | --- |
+| Delay-prediction error after a flood | 25.8% | 13.9% | 6.1% |
 
-How customers behave after a confirmation message is a stated assumption in the twin
-(`dispatch/twin/prevention.py`), not field data.
+| Failed deliveries over 30 simulated days (mean of 5 seeds) | No confirmations | High-risk only | All orders |
+| --- | --- | --- | --- |
+| Failure rate | ~17% | ~12% (28% fewer) | ~10% (41% fewer) |
+| Orders messaged | 0% | 47% | 100% |
 
-- Planning on OSRM, all three strategies included (each gets a 1 s search): 50 orders on 5 vans in 3.6–4.5 s,
-  100 orders on 8 vans in 4.4 s.
-- A severe flood at Adyar: the re-plan drives around it, cutting in-zone driving from 11.3 to 6.4 km for
-  5.7 km more in total. The map shows the old routes dashed.
-- A flood report resolved from the human queue re-planned the routes and messaged 7 customers.
+Customer behaviour after a confirmation message (reply rates, effect on failures) is an assumption
+of the simulator, defined in `dispatch/twin/prevention.py`.
 
-## Project layout
+- Planning time on OSRM, including all three strategies (1 s search each): 3.6–4.5 s for 50 orders on
+  5 vans, 4.4 s for 100 orders on 8 vans.
+- A severe flood at Adyar reduced driving inside the zone from 11.3 km to 6.4 km, at a cost of 5.7 km
+  of extra total distance.
+
+## Project structure
 
 ```
-run.py                 launcher: services, demo data, API (:8080), console (:8001), Gemini key dialog
+run.py                 launcher: services, demo data, API (:8080), console (:8001), API key dialog
 dispatch/
-  core/                contracts: models, decisions, ports, events, config
-  store/               SQLAlchemy store, append-only event log, Alembic migrations
-  routing/             OSRM and straight-line engines, incident slowdowns
-  optimize/            OR-Tools solver, plan scoring and critic
-  decide/              decision catalogue, risk and attempt rules, providers (rules, trained model,
-                       LLM, optional Jev), calibration, gates
-  address/             Chennai place gazetteer (geocoding comes in phase 4)
-  messaging/           message templates and the simulated messenger
+  core/                shared models, decision types, interfaces, events, configuration
+  store/               SQLAlchemy store, event log, Alembic migrations
+  routing/             OSRM and straight-line routing, incident slowdowns and detours
+  optimize/            OR-Tools solver, plan scoring
+  decide/              decision definitions, rules, trained model, LLM and Jev providers, calibration
+  address/             Chennai place gazetteer
+  messaging/           message templates, simulated messenger
   twin/                day simulator, learner, failed-delivery comparison
-  agent/               ops chat: ADK agent and its tools
-  api/                 FastAPI app (REST + SSE)
-  planning.py          planner: matrix, 3 strategies, critic, apply
-  incidents.py         problem triage and re-planning
+  agent/               chat assistant (Google ADK) and its tools
+  api/                 FastAPI application (REST and SSE)
+  planning.py          planning service
+  incidents.py         incident triage and re-planning
   replies.py           customer reply handling
-  prevention.py        risk check, confirmations, failed-attempt check, reattempt / return
-  when.py              delivery times from customer text ("after 6 pm", "tomorrow morning")
-  play.py, scenarios/  "Play a day": a scripted day through the real services (python -m dispatch.play)
-  eval.py, evals/      triage accuracy on 30 labelled reports (python -m dispatch.eval)
-  notify.py, demo.py   arrival-time messages; the Chennai demo day
-web/console.html       the operations console
-docs/img/              README images (recorded from a played day)
-infra/                 Docker Compose services and OSRM data preparation
-specs/                 v2 spec (current) and the original hackathon spec (history)
-tests/                 offline test suite, including contract checks for every port
+  prevention.py        risk scoring, confirmations, failed-attempt verification
+  when.py              parsing of delivery times from text
+  play.py, scenarios/  scripted demo day (python -m dispatch.play)
+  eval.py, evals/      triage accuracy evaluation (python -m dispatch.eval)
+  notify.py, demo.py   arrival-time notifications, demo data
+web/console.html       operations console
+docs/img/              README images
+infra/                 Docker Compose services, OSRM data preparation
+specs/                 design spec (v2-spec.md), roadmap, original hackathon spec
+tests/                 test suite
 ```
 
-## Tests
+The full design is documented in [specs/v2-spec.md](specs/v2-spec.md), and remaining work in
+[specs/roadmap.md](specs/roadmap.md).
+
+## Testing
 
 ```bash
 pytest -q
 ```
 
-The tests need no network access and no AI keys. To also run the store tests against Postgres, see
-[CLAUDE.md](CLAUDE.md).
+The test suite runs offline and needs no API keys. Instructions for running the store tests against
+Postgres are in [CLAUDE.md](CLAUDE.md).
 
-To measure how well the AI triages problem reports, run the 30 labelled reports (English, Tamil and Hindi)
-through the real decision engine. This needs a Gemini key and makes about 90 API calls. Answers are cached,
-so a run cut short by the free quota picks up where it stopped:
+Triage accuracy can be measured on 30 labelled incident reports in English, Tamil and Hindi:
 
 ```bash
-python -m dispatch.eval            # kind accuracy, how many were handled without a person, how many of those were wrong
+python -m dispatch.eval
 ```
 
-## If something goes wrong
+This needs a Gemini key and makes about 90 API calls. Answers are cached, so a run interrupted by
+the free-tier quota resumes where it stopped.
 
-| Problem                              | Fix                                                                                                                                                                                                                                                 |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Port 8080/8001 is already in use"   | Another copy is running. Close it, or set `API_PORT` / `UI_PORT`                                                                                                                                                                                    |
-| Reports always land in **Needs you** | There's no Gemini key, or the AI isn't reachable. The **Decisions** tab shows why: `429 RESOURCE_EXHAUSTED` means the daily free quota is used up, `503` means the model is overloaded. Try another `GEMINI_MODEL` in `.env`, or a key with billing |
-| "Routing: straight-line estimate"    | OSRM isn't running. Build its data with `python infra/prepare_osrm.py`, then restart                                                                                                                                                                |
-| The console can't reach the API      | Start everything with `python run.py`, not by opening the HTML file                                                                                                                                                                                 |
-| "Missing packages"                   | Activate the venv and run `pip install -r requirements.txt`                                                                                                                                                                                         |
+## Troubleshooting
 
-## Limits
+| Problem | Solution |
+| ------- | -------- |
+| Port 8080 or 8001 is already in use | Another instance is running. Stop it, or set `API_PORT` / `UI_PORT` |
+| All reports end up in **Needs you** | No Gemini key is set, or the API is unavailable. The **Decisions** tab shows the error: `429 RESOURCE_EXHAUSTED` means the daily quota is used up, `503` means the model is overloaded. Set a different `GEMINI_MODEL` in `.env`, or use a key with billing enabled |
+| Routing shows "straight-line estimate" | OSRM is not running. Run `python infra/prepare_osrm.py`, then restart |
+| The console cannot reach the API | Start the app with `python run.py` instead of opening the HTML file directly |
+| Missing packages | Activate the virtual environment and run `pip install -r requirements.txt` |
 
-- OSRM speeds are free-flow. Live traffic isn't used yet, and P90 arrival times are placeholders.
-- How much of a road leg lies inside a problem zone is estimated on the straight line between its ends,
-  and detours go through one of 8 points around the zone, not along every possible street.
-- Risk scores and failed-attempt checks use hand-set rules until a trained model has enough labelled
-  outcomes and beats them on recent ones (`GET /ml/status` shows where it stands). On the simulator,
-  that takes months of deliveries.
-- On the free Gemini tier, each model allows about 20 requests a day. Set another `GEMINI_MODEL` in
-  `.env`, or use a key with billing.
+## Limitations
+
+- OSRM uses free-flow speeds. Live traffic data is not used, and the 90th-percentile arrival times are
+  a fixed margin rather than a model.
+- The share of a leg inside an incident zone is estimated along the straight line between its
+  endpoints, and detours are limited to eight waypoints per zone.
+- Risk scoring and failed-attempt verification use hand-written rules until the trained model has
+  enough data and outperforms them (`GET /ml/status` shows its state). In simulation this takes
+  several months of deliveries.
+- Customer messaging is simulated; no WhatsApp or SMS provider is connected.
+- The Gemini free tier allows about 20 requests per day per model.
 
 Started at Agent Wars - Google DevFest '26 Chennai (problem statement: Logistics Handler), and continued since.
 
