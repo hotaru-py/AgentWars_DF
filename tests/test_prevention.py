@@ -134,8 +134,8 @@ def test_unconfirmed_orders_call_first_until_the_customer_replies(world):
 
 
 def test_solver_keeps_an_order_no_earlier_than_promised():
-    """Two neighbouring stops: holding the first one back swaps their order instead of idling the van;
-    a lone held-back stop is served no earlier than promised."""
+    """A held-back stop is served no earlier than promised, whether the solver swaps it behind its
+    neighbour or waits; a lone held-back stop waits."""
     eng = HaversineEngine()
     depot = LatLng(lat=13.0067, lng=80.2206)
     near = Order(depot_id="d", customer_id="c", raw_address="near", location=LatLng(lat=13.0400, lng=80.2206))
@@ -148,8 +148,8 @@ def test_solver_keeps_an_order_no_earlier_than_promised():
     first = stops(base)
     assert [s.order_id for s in first] == [near.id, far.id]
     hold = first[1].eta_p50                                       # "no earlier than when you'd reach the 2nd stop"
-    swapped = stops(base.model_copy(update={"not_before": {near.id: hold}}))
-    assert [s.order_id for s in swapped] == [far.id, near.id]
+    held = {s.order_id: s for s in stops(base.model_copy(update={"not_before": {near.id: hold}}))}
+    assert held[near.id].eta_p50 >= hold - timedelta(seconds=1)
     alone = base.model_copy(update={"orders": [near], "matrix": eng.matrix(pts[:2]),
                                     "not_before": {near.id: start + timedelta(hours=1)}})
     assert stops(alone)[0].eta_p50 >= start + timedelta(hours=1) - timedelta(seconds=1)

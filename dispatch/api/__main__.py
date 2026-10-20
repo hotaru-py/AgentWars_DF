@@ -8,7 +8,7 @@ from .app import create_app
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Dispatch v2 API")
+    ap = argparse.ArgumentParser(description="LookAtDisPatch API")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()

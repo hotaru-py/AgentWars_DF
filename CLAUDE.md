@@ -1,5 +1,7 @@
 # Project notes for Claude
 
+The product is **LookAtDisPatch** (shown in the console, API docs and README); the Python package stays `dispatch`.
+
 ## What's here
 - `dispatch/` is **v2**, the only version (v1 `dispatch_agent/` and `logistics_agent/` were removed).
   The spec is `specs/v2-spec.md`. Update the spec in the same change whenever code needs to differ from it.
@@ -29,12 +31,16 @@
 - **Model:** `GEMINI_MODEL`, default `gemini-3.6-flash`. `gemini-2.5-flash`
   returns 404 for new AI Studio keys. `gemini-flash-latest` shares `gemini-3.8-flash`'s quota.
 - **Gemini free tier:** about 5 requests/min **and** about 20 requests/day per model per project.
-  A new key in the same project shares the quota.
+  A new key in the same project shares the quota. Triage costs 3 calls per report with logprobs (5+ with
+  sampling), so `python -m dispatch.eval` (30 reports) needs several days of free quota; it caches answers
+  in `.eval_cache.json` and resumes. Don't burn quota on ad-hoc live checks before a demo.
 - **Windows file locks:** writing a file another process is reading can raise `PermissionError`
   on `os.replace`. Retry it.
 - **Windows time zones** need the `tzdata` package (in requirements).
 - **Docker is needed for v2 infra** (Postgres/PostGIS, Redis, OSRM: see `infra/README.md`).
   Without it, v2 falls back to SQLite and straight-line routing.
+- **Headless screenshots of the console:** add `?nostream=1` (an open SSE stream keeps headless Chrome/Edge
+  from ever finishing); the activity feed then loads once from `GET /events`.
 - **Use `127.0.0.1`, not `localhost`, for local services.** On Windows `localhost` tries IPv6 `::1`
   first while Docker listens on IPv4 only: every connection then stalls ~8 s.
 - **Docker is installed per-user** (`%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin`). Shells started

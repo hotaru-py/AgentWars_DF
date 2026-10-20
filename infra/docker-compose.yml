@@ -1,4 +1,4 @@
-# Dispatch v2 local stack (spec §3.2). Start: docker compose -f infra/docker-compose.yml up -d
+# LookAtDisPatch local stack (spec §3.2). Start: docker compose -f infra/docker-compose.yml up -d
 # OSRM needs its data prepared once first: python infra/prepare_osrm.py   (see infra/README.md)
 
 services:

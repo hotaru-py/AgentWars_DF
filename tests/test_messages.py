@@ -15,7 +15,7 @@ from dispatch.core.config import Settings
 from dispatch.core.decisions import ChoiceAnswer, NoulAnswer, ScoreAnswer
 from dispatch.core.events import MessageEvent
 from dispatch.core.ids import new_id
-from dispatch.core.models import (Customer, Depot, Incident, IncidentKind, Order, OrderState, Plan, Stop,
+from dispatch.core.models import (Customer, Incident, IncidentKind, Order, OrderState, Plan, Stop,
                                   VehicleRoute)
 from dispatch.decide import DecisionEngine, ProviderUnavailable
 from dispatch.incidents import IncidentService

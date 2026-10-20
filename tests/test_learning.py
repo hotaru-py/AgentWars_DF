@@ -12,8 +12,8 @@ from dispatch import demo
 from dispatch.core.config import Settings
 from dispatch.core.events import MessageEvent, StopEvent
 from dispatch.core.ids import new_id
-from dispatch.core.models import Customer, Order
-from dispatch.decide import DELIVERY_RISK, DecisionEngine
+from dispatch.core.models import Customer, Incident, Order
+from dispatch.decide import DecisionEngine
 from dispatch.decide.ml import TASKS, LogisticModel, MlDecider, MlRegistry, MlTask, Sample, auc
 from dispatch.messaging import SimMessenger
 from dispatch.optimize import OrToolsSolver
@@ -228,3 +228,108 @@ def test_twin_learned_policy_goes_through_the_same_check():
     # Rules stayed in charge; the only difference is exploration (10% of risky orders not messaged),
     # which is what unbiased training labels cost: fewer messages, a few more failures.
     assert learned["messages"] < risk["messages"] and learned["failed"] >= risk["failed"]
+
+
+# ---------------------------------------------------------------- play a day
+def test_play_a_day_offline(tmp_path):
+    from dispatch.core.models import IncidentState, OrderState
+    from dispatch.play import Player, RecordedLlm, load, services
+    st = Store(f"sqlite:///{tmp_path / 'play.db'}")
+    st.create_all()
+    demo.seed(st)
+    settings = Settings(google_api_key="")
+    planner = Planner(st, HaversineEngine(), OrToolsSolver(), time_limit_s=0.2)
+    _, incidents, replies, prevention = services(st, settings, planner=planner)
+    scenario = load()
+    log = Player(st, planner, incidents, replies, prevention).play(scenario)
+    assert len(log) == len(scenario["steps"])
+    assert _order(st, "Anitha Joseph").state == OrderState.rto                # refused cash on delivery
+    assert _order(st, "Karthik S").state == OrderState.reattempt               # not home
+    assert _order(st, "Suresh Babu").state == OrderState.cancelled             # replied "3"
+    assert _order(st, "Rahul Nair").notes.count("Directions") == 1             # replied with directions
+    assert {i.kind.value for i in st.list(Incident) if i.state == IncidentState.active} == {"flood", "breakdown"}
+    triage = st.decisions(type_="incident_triage", limit=5)
+    assert {(d.decider, d.model) for d in triage} == {("llm", "recorded")}     # no key: recorded AI answers
+    steps = st.events_since(0, types=["demo.step"], limit=100)
+    assert len(steps) == len(scenario["steps"]) + 1 and steps[-1].payload["text"] == "The day is over"
+    assert st.events_since(0, types=["day.simulated"], limit=5)                 # the day was replayed and learned from
+    assert isinstance(incidents.engine.providers["llm"], RecordedLlm)
+    st.engine.dispose()
+
+
+def test_recorded_llm_only_knows_its_texts():
+    from dispatch.decide import INCIDENT_TRIAGE
+    from dispatch.decide.deciders.base import ProviderUnavailable
+    from dispatch.play import RecordedLlm
+    rec = RecordedLlm({"flood at Adyar": {"kind": "flood", "severity": 3, "credible": True}})
+    a = run(rec.decide({"report": {"text": "flood at Adyar"}}, INCIDENT_TRIAGE.questions))
+    assert a["kind"].choice == "flood" and a["kind"].confidence > 0.95 and a["credible"].p > 0.95
+    with pytest.raises(ProviderUnavailable):
+        run(rec.decide({"report": {"text": "something else"}}, INCIDENT_TRIAGE.questions))
+
+
+# ---------------------------------------------------------------- triage eval
+class _Labelled:
+    """A fake provider that answers from the labels; `wrong` texts get a confident wrong kind."""
+    name, model, capabilities = "llm", "fake-oracle", {"text"}
+
+    def __init__(self, reports, wrong=(), fail=False):
+        from types import SimpleNamespace
+        self.labels = {r["text"]: r for r in reports}
+        self.wrong, self.fail = set(wrong), fail
+        self.meta = SimpleNamespace(model=self.model, method="fake", cost={})
+        self.calls = 0
+
+    async def decide(self, state, questions):
+        from dispatch.core.decisions import ChoiceAnswer, NoulAnswer, ScoreAnswer
+        from dispatch.decide.deciders.base import ProviderUnavailable
+        self.calls += 1
+        if self.fail:
+            raise ProviderUnavailable("429 quota")
+        r = self.labels[state["report"]["text"]]
+        kind = "traffic" if r["text"] in self.wrong else r["kind"]
+        crit = questions["kind"].criteria
+        return {"kind": ChoiceAnswer.from_probabilities({k: 0.99 if k == kind else 0.01 / (len(crit) - 1) for k in crit}),
+                "severity": ScoreAnswer.from_probabilities([0, 0, 1, 0, 0]),
+                "credible": NoulAnswer(p=0.99 if r["credible"] else 0.01)}
+
+
+def test_triage_eval_scores_and_caches(tmp_path):
+    from dispatch.eval import evaluate, load_reports
+    reports = load_reports()
+    assert len(reports) == 30 and {r["kind"] for r in reports} >= {"flood", "traffic", "closure", "breakdown",
+                                                                    "other", "not_an_incident"}
+    perfect = asyncio.run(evaluate("llm", _Labelled(reports), reports, cache=None))
+    assert perfect["kind_accuracy"] == 1.0 and perfect["outcome_accuracy"] == 1.0 and perfect["wrong_auto_rate"] == 0
+    assert perfect["automation_rate"] == 1.0                                    # 0.99 clears the strict 0.95 gate
+    floods = [r["text"] for r in reports if r["kind"] == "flood"][:3]
+    cache = tmp_path / "cache.json"
+    fake = _Labelled(reports, wrong=floods)
+    bad = asyncio.run(evaluate("llm", fake, reports, cache=cache))
+    assert bad["kind_accuracy"] == 0.9 and bad["wrong_auto_rate"] == 0.1 and len(bad["mistakes"]) == 3
+    again = asyncio.run(evaluate("llm", fake, reports, cache=cache))
+    assert again["cache"] == {"hits": 30, "misses": 0} and fake.calls == 30 and again["kind_accuracy"] == 0.9
+    down = asyncio.run(evaluate("llm", _Labelled(reports, fail=True), reports, cache=None))
+    assert down["answered"] == 0 and down["automation_rate"] == 0 and "429" in down["unanswered"][0]["error"]
+    assert "failed 3 times in a row" in down["unanswered"][-1]["error"]          # stopped early, not 30 x retries
+
+
+def test_demo_llm_falls_back_to_recorded_answers():
+    from dispatch.decide import INCIDENT_TRIAGE
+    from dispatch.decide.deciders.base import ProviderUnavailable
+    from dispatch.play import LiveOrRecorded, RecordedLlm, demo_llm
+
+    class QuotaGone:
+        name, model = "llm", "gemini-x"
+        meta = None
+
+        async def decide(self, state, questions):
+            raise ProviderUnavailable("429 RESOURCE_EXHAUSTED")
+    assert isinstance(demo_llm(Settings(google_api_key=""), {}), RecordedLlm)
+    p = demo_llm(Settings(google_api_key="k"), {"llm": QuotaGone()})
+    assert isinstance(p, LiveOrRecorded)
+    text = "Severe waterlogging at Adyar, cars stuck near the signal"            # recorded in the scenario
+    a = run(p.decide({"report": {"text": text}}, INCIDENT_TRIAGE.questions))
+    assert a["kind"].choice == "flood" and p.meta.model == "recorded"
+    with pytest.raises(ProviderUnavailable, match="429"):                       # unknown text: the live error
+        run(p.decide({"report": {"text": "something new"}}, INCIDENT_TRIAGE.questions))

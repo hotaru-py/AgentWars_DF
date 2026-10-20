@@ -208,6 +208,7 @@ class Stop(Model):
     leg_m: float = Field(default=0, ge=0)
     leg_s: float = Field(default=0, ge=0)
     call_first: bool = False           # unconfirmed risky order: the driver calls ahead (spec §10)
+    via: LatLng | None = None          # the leg to this stop goes around an incident through this point
 
 
 class VehicleRoute(Model):

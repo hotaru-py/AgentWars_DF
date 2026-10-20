@@ -7,7 +7,7 @@ delivery, how findable their address is. The same days are replayed under three 
 same random draws (common random numbers), so the only difference is the policy:
 
   none       no confirmations (the baseline)
-  risk       confirm orders whose rules risk score is >= threshold (Dispatch before it has data)
+  risk       confirm orders whose rules risk score is >= threshold (LookAtDisPatch before it has data)
   learned    like risk for the first `train_days`; then the `ml` provider's training runs on those
              days' outcomes, and if its model passes the same check as in production (beat the rules
              on the newest 20%), the model scores instead. It learns only from orders nobody

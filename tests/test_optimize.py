@@ -79,6 +79,51 @@ def test_incident_share_and_matrix_slowdown():
     assert two.seconds[0][1] > wet.seconds[0][1]                                     # overlapping incidents multiply
 
 
+def test_bad_zone_is_driven_around_through_a_via_point():
+    """Two points on opposite sides of a small, badly flooded zone: going around beats going through."""
+    eng = HaversineEngine()
+    zone = Circle(center=LatLng(lat=13.0, lng=80.22), radius_m=1000)
+    west, east = LatLng(lat=13.0, lng=80.19), LatLng(lat=13.0, lng=80.25)
+    m = eng.matrix([west, east])
+    flood = Incident(kind=IncidentKind.flood, area=zone, slowdown=8.0, state=IncidentState.active)
+    through = apply_incidents(m, [flood])                         # no engine: slowed, no detours
+    around = apply_incidents(m, [flood], eng)
+    assert through.detours == {} and "0-1" in around.detours and "1-0" in around.detours
+    assert m.seconds[0][1] < around.seconds[0][1] < through.seconds[0][1]          # around: longer than a dry day
+    assert around.meters[0][1] > m.meters[0][1]                                     # ...and more km
+    via = around.detours["0-1"]
+    assert share_inside(west, via, zone) == 0 and share_inside(via, east, zone) == 0
+    mild = flood.model_copy(update={"slowdown": 1.05})
+    assert apply_incidents(m, [mild], eng).detours == {}                            # not worth the extra km
+
+
+def test_detour_flows_into_stops_geometry_and_twin(tmp_path):
+    from dispatch.core.models import Order as O
+    from dispatch.twin import simulate_day
+    st = Store(f"sqlite:///{tmp_path / 'd.db'}")
+    st.create_all()
+    west = LatLng(lat=13.0, lng=80.19)
+    depot = Depot(name="W", location=west, opens_at=datetime.now(timezone.utc), closes_at=datetime.now(timezone.utc) + timedelta(hours=10))
+    st.put(depot)
+    st.put(Vehicle(depot_id=depot.id, name="V", capacity_kg=50, capacity_l=400))
+    c = Customer(name="E", phone="1")
+    st.put(c)
+    o = O(depot_id=depot.id, customer_id=c.id, raw_address="east")
+    st.create_order(o)
+    st.set_geocode(o.id, LatLng(lat=13.0, lng=80.25), None, 1.0, "test")
+    flood = Incident(kind=IncidentKind.flood, area=Circle(center=LatLng(lat=13.0, lng=80.22), radius_m=1000),
+                     slowdown=8.0, state=IncidentState.active, severity=1.0, description="flood")
+    st.save_incident(flood, "incident.triaged")
+    pl = Planner(st, HaversineEngine(), OrToolsSolver(), time_limit_s=0.3)
+    plan = pl.run(depot.id, "flood").plan
+    stop = plan.routes[0].stops[0]
+    assert stop.via is not None and stop.via in plan.routes[0].geometry              # the map draws the detour
+    day = simulate_day(plan, {o.id: st.get(O, o.id)}, west, plan.params and depot.opens_at, HaversineEngine(),
+                       [flood], run=1)
+    assert day.stops[0].actual_s < day.stops[0].base_s * 2                         # the van went around, not through
+    st.engine.dispose()
+
+
 # ---------------------------------------------------------------- solver
 def test_solver_meets_contract_and_plans_everything():
     plan = check_solver(OrToolsSolver(), _problem(_orders()))

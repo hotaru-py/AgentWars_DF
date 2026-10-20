@@ -27,8 +27,7 @@ from dispatch.core.decisions import DecisionRecord
 from dispatch.core.events import DecisionOverridden, Event, MessageEvent, StopEvent
 from dispatch.core.ids import new_id
 from dispatch.core.models import (Area, Circle, Customer, Depot, Driver, Incident, IncidentKind, IncidentState, LatLng,
-                                  Model, Order,
-                                  OrderKind, OrderState, Payment, Plan, Policy, Vehicle, utcnow)
+                                  Model, Order, OrderKind, OrderState, Payment, Plan, Policy, Vehicle)
 from dispatch import demo
 from dispatch.agent import ChatService, ToolContext
 from dispatch.decide import DecisionEngine, default_providers
@@ -200,25 +199,52 @@ def create_app(store: Store | None = None, planner: Planner | None = None, setti
     if store is None:
         store = Store(settings.database_url)
         store.migrate()
-    app = FastAPI(title="Dispatch v2", version=__version__,
+    app = FastAPI(title="LookAtDisPatch", version=__version__,
                   description="Last-mile dispatch with confidence-gated autonomy. See specs/v2-spec.md.")
     if planner is None:
         planner = Planner(store, default_engine(settings.osrm_url, settings.osrm_time_factor), OrToolsSolver(),
                           time_limit_s=settings.plan_time_limit_s)
+    demo_mode = os.environ.get("DEMO_MODE", "").strip().lower() in ("1", "true", "yes")
     if engine is None:
-        engine = DecisionEngine(store, default_providers(settings), settings)
+        providers = default_providers(settings)
+        if demo_mode:                       # the scripted day's texts get AI answers even without a key or quota
+            from dispatch.play import demo_llm
+            providers["llm"] = demo_llm(settings, providers)
+        engine = DecisionEngine(store, providers, settings)
     messenger = SimMessenger(store)
     incidents = IncidentService(store, engine, planner, messenger, settings.depot_tz)
     replies = ReplyService(store, engine, planner, messenger, settings.depot_tz)
     prevention = PreventionService(store, engine, planner, messenger, settings)
-    chat = ChatService(ToolContext(store, planner, incidents, replies, settings.depot_tz, prevention), settings,
-                       chat_runner_factory)
+    playing = {"on": False}
+
+    def start_play(pace_s: float = 2.5, background: BackgroundTasks | None = None) -> dict:
+        """Fresh demo day + the scripted day in the background (POST /demo/play, chat play_a_day)."""
+        if playing["on"]:
+            raise HTTPException(409, "a day is already playing")
+        from dispatch.play import Player, load as load_scenario
+        scenario = load_scenario()
+        demo.reset(store, keep_learning=True)
+        playing["on"] = True
+
+        def run() -> None:
+            try:
+                Player(store, planner, incidents, replies, prevention, pace_s=pace_s).play(scenario)
+            finally:
+                playing["on"] = False
+        if background is not None:
+            background.add_task(run)
+        else:
+            import threading
+            threading.Thread(target=run, daemon=True).start()
+        return {"started": True, "steps": len(scenario["steps"])}
+
+    chat = ChatService(ToolContext(store, planner, incidents, replies, settings.depot_tz, prevention,
+                                   start_play if demo_mode else None), settings, chat_runner_factory)
     app.state.store, app.state.planner, app.state.engine, app.state.incidents = store, planner, engine, incidents
     app.state.prevention = prevention
     origins = [o.strip() for o in os.environ.get(
         "CORS_ORIGINS", "http://localhost:8001,http://127.0.0.1:8001").split(",") if o.strip()]
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
-    demo_mode = os.environ.get("DEMO_MODE", "").strip().lower() in ("1", "true", "yes")
 
     @app.get("/state", tags=["meta"])
     def snapshot(depot_id: str | None = None) -> dict:
@@ -238,11 +264,17 @@ def create_app(store: Store | None = None, planner: Planner | None = None, setti
             "orders": [{**o.model_dump(mode="json"), "customer": customers[o.customer_id].name
                         if o.customer_id in customers else None} for o in orders],
             "plan": (p.model_dump(mode="json") if (p := store.current_plan(depot.id)) else None),
+            # the routes before the latest re-plan, drawn dashed while a problem is active
+            "previous_routes": ([{"vehicle_id": r.vehicle_id, "geometry": [g.model_dump() for g in r.geometry]}
+                                 for r in prev.routes if r.geometry]
+                                if p and p.parent_plan_id and any(i.state == IncidentState.active for i in incidents)
+                                and (prev := store.get(Plan, p.parent_plan_id)) else []),
             "incidents": [i.model_dump(mode="json") for i in incidents],
             "plan_decision": plan_dec.model_dump(mode="json") if plan_dec else None,
             "queue": sum(1 for i in incidents if i.state == IncidentState.reported),
             "policy": store.current_policy().model_dump(mode="json"),
             "deciders": sorted(engine.providers), "llm": settings.gemini_enabled, "jev": settings.jev_enabled,
+            "llm_recorded": not settings.gemini_enabled and getattr(engine.providers.get("llm"), "model", None) == "recorded",
             "routing": planner.engine.name, "demo": demo_mode, "last_seq": store.last_seq(),
             "risk_threshold": settings.risk_confirm_threshold,
         }
@@ -254,6 +286,12 @@ def create_app(store: Store | None = None, planner: Planner | None = None, setti
             learned (policy versions) is kept unless forget=true."""
             d = demo.reset(store, keep_learning=not forget)
             return {"depot_id": d.id}
+
+        @app.post("/demo/play", status_code=202, tags=["demo"])
+        def demo_play(background: BackgroundTasks, pace_s: float = Query(2.5, ge=0, le=30)) -> dict:
+            """Demo only: start a fresh demo day and play the scripted day (dispatch/scenarios/chennai_day.json)
+            through the real services, one step every `pace_s` seconds. Watch /stream (demo.step events)."""
+            return start_play(pace_s, background)
 
     @app.exception_handler(StoreError)
     def _store_errors(_: Request, e: StoreError):
@@ -410,7 +448,7 @@ def create_app(store: Store | None = None, planner: Planner | None = None, setti
     def twin_prevention(days: int = Query(30, ge=1, le=365), orders_per_day: int = Query(60, ge=1, le=1000),
                         seed: int = 7, threshold: float | None = Query(None, ge=0, le=1)) -> dict:
         """Replay synthetic days with and without prevention (same customers, same random draws) and
-        report failed deliveries per policy: none, risk-targeted (Dispatch) and confirm-everyone."""
+        report failed deliveries per policy: none, risk-targeted (LookAtDisPatch) and confirm-everyone."""
         t = settings.risk_confirm_threshold if threshold is None else threshold
         return prevention_report(days=days, orders_per_day=orders_per_day, seed=seed, threshold=t)
 
@@ -559,10 +597,12 @@ def create_app(store: Store | None = None, planner: Planner | None = None, setti
     def policy() -> Policy:
         return store.current_policy()
 
-    # ------------------------------------------------------------ twin
-    @app.post("/twin/replay", tags=["twin"])
-    def replay() -> None:
-        raise HTTPException(501, "digital twin arrives in phase 5")
+    # ------------------------------------------------------------ events
+    @app.get("/events", response_model=list[Event], tags=["meta"])
+    def recent_events(after: int = 0, types: str | None = None, limit: int = Query(100, ge=1, le=1000)) -> list[Event]:
+        """Events after `after` (oldest first), as plain JSON: the same log /stream sends live."""
+        wanted = [t.strip() for t in types.split(",")] if types else None
+        return store.events_since(after, wanted, limit=limit)
 
     # ------------------------------------------------------------ live stream
     @app.get("/stream", tags=["meta"])

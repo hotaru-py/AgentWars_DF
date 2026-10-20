@@ -118,6 +118,26 @@ def test_llm_auto_falls_back_to_sampling_and_remembers():
     assert g.calls - calls == 5                                        # no logprobs retry the second time
 
 
+def test_llm_quota_error_does_not_switch_methods():
+    """A 429 on the first logprobs call is not 'logprobs unsupported': stay on logprobs (3 calls per
+    report), don't fall back to sampling (5+ calls) for the rest of the run."""
+    g = FakeGemini(logprobs=True)
+    real = g.generate_content
+
+    def quota_once(model, contents, config):
+        if g.calls == 0:
+            g.calls += 1
+            raise RuntimeError("429 RESOURCE_EXHAUSTED. You exceeded your current quota")
+        return real(model, contents, config)
+    g.generate_content = quota_once
+    d = LlmDecider(client=g, method="auto")
+    with pytest.raises(ProviderUnavailable, match="429"):
+        run(d.decide({"report": {"text": "water"}}, Q))
+    assert d._logprobs_ok is None                                      # undecided, not "unsupported"
+    run(d.decide({"report": {"text": "water"}}, Q))
+    assert d.meta.method == "logprobs" and d._logprobs_ok is True
+
+
 def test_llm_unavailable_without_key_or_on_errors():
     with pytest.raises(ProviderUnavailable):
         run(LlmDecider(api_key="").decide("x", Q))

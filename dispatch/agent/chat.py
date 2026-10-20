@@ -27,6 +27,9 @@ WHAT TO DO
   for a van problem). It works out what and where it is and re-plans.
 - "Plan the routes": plan_routes. "How did the day go?" / "learn from today": run_the_day.
 - "Which deliveries might fail?" / "check before the vans leave": check_risky_deliveries.
+- "Any failed deliveries?", "who moved their delivery?", "what went wrong today?": delivery_problems.
+  Only call decide_failed_delivery when the person tells you what happened at that door.
+- "Show me a demo" / "play a day": play_a_day (it replaces today's demo deliveries, so only when asked).
 - "What needs me?": list_waiting. Only call resolve_problem when the person tells you what a waiting
   problem is; never guess for them.
 

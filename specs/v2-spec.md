@@ -1,8 +1,8 @@
-# Dispatch v2: Build Spec
+# LookAtDisPatch (v2): Build Spec
 
 Status: draft for review · 2026-10-17 · replaces [1230-spec.md](1230-spec.md) for all new work.
 
-Dispatch v2 rebuilds the hackathon demo as a real last-mile dispatch system for a
+LookAtDisPatch (v2) rebuilds the hackathon demo as a real last-mile dispatch system for a
 small city fleet. The demo proved the loop (plan → disruption → re-plan → notify →
 learn). v2 keeps that loop and adds the parts that decide whether deliveries actually
 succeed in India:
@@ -110,7 +110,8 @@ flowchart TB
 
 ## 4. Repository layout
 
-As built; folders marked *(planned)* are empty placeholders for later phases.
+As built. The ETA model, signal sources and geocoders exist only as port contracts in `core/ports.py`:
+their phases are out of scope (see [roadmap.md](roadmap.md)).
 
 ```
 run.py                       # launcher: Docker services, demo data, API (:8080), console (:8001), key dialog
@@ -124,8 +125,6 @@ dispatch/
                              #   failed-attempt rules), ml.py (trained provider), deciders/{rules,llm}.py,
                              #   deciders/optional/jev.py
   address/                   # places.py (Chennai gazetteer); parser, geocoders, DIGIPIN in phase 4
-  eta/                       # (planned, phase 5) quantile ETA model
-  signals/                   # (planned) weather / traffic sources
   messaging/                 # templates, SimMessenger; WhatsApp / SMS in phase 7
   twin/                      # day replay (simulate, day), learner, prevention comparison
   agent/                     # ADK ops chat; tools call the services, never the DB
@@ -362,10 +361,20 @@ message) after `MAX_ATTEMPTS` genuine failures (default 3) or at once for a refu
   by multiplying their slowdowns per arc.
 - **Incidents in the matrix (as built):** each arc's share inside an incident area is estimated
   on the straight segment between its ends (sampled every 200 m), because fetching a road shape
-  per pair is too slow. The solver then reorders stops around slowed arcs, but OSRM's drawn road
-  can still cross the area. **Next routing upgrade:** push incident slowdowns into OSRM itself
-  with MLD live speed updates (`osrm-customize --segment-speed-file`), so routes genuinely detour
-  (v1 achieved this with cached alternative roads).
+  per pair is too slow. **Detours (as built):** each circular zone gets 8 via points on a ring just
+  outside it (1.25 × radius + 300 m). One extra matrix call gives travel to and from every via point;
+  an arc that crosses a zone takes the best "a → via → b" when that saves at least 2% over driving
+  through (both scored with the slowdowns). The via point is stored on the stop (`Stop.via`), the map
+  routes through it, the twin replays the detour, and the console draws the pre-incident routes dashed.
+  Measured on OSRM (demo day, severe flood): at Adyar, in-zone driving fell from 11.3 to 6.4 km for
+  5.7 km more in total; at T. Nagar reordering alone halved it (9.1 → 4.2 km). A zone around the depot
+  can't be avoided. A finer option remains: OSRM MLD speed updates (`osrm-customize --segment-speed-file`).
+- **Solver costs (as built):** vans leave at the plan start (or the driver's shift start). Balance is a
+  global span cost on a "work" dimension (driving + time at the door), not on clock time: balancing clock
+  time let one evening window (a 6 PM reschedule) make a van's day long anyway, and the cheapest plan piled
+  every stop onto it. Waiting costs `wait_penalty` (0.2 per second, cheap, since idling before a late window
+  isn't wasted work), and arriving before a promised time (`not_before`) costs `early_penalty` (2.0), more
+  than waiting. Waiting has no hard cap.
 - **Live insertion:** `Solver.insert` fixes each van's stops already visited and its current
   position, then re-optimizes the remainder within a time limit (default 2 s).
 - **Plan scoring:** v1's five-measure critic (on time, efficiency, cycle, balance, resilience)
@@ -385,6 +394,13 @@ message) after `MAX_ATTEMPTS` genuine failures (default 3) or at once for a refu
 - **Calibration:** a nightly job joins `decisions` with their `outcome`s, plots
   reliability per decision type, and proposes new gate thresholds. Applying them is a
   `policy.updated` event.
+- **Play a day (as built, `dispatch/play.py`, `POST /demo/play`, console "▶ Play a day"):** a scripted day
+  (`dispatch/scenarios/chennai_day.json`) driven through the real services on a fresh demo day: plan, risk
+  check, customer replies (confirm, reschedule, directions, cancel), drivers completing stops, a flood, a
+  breakdown, scripted failed attempts (`fails`), and the replay. Each step is a `demo.step` event (narrated
+  in the activity feed, `pace_s` apart). With no Gemini key, `RecordedLlm` answers the scenario's texts as
+  the `llm` provider (ledger model `recorded`), so the whole day runs offline; with a key, the live model does, and the recorded answers cover for it when it's unavailable (quota, overload).
+  Simulated vans don't move: each re-plan starts every van at the depot, and stops are completed in plan order.
 - **As built (`dispatch/twin/`, `POST /day/run`, console "▶ Run the day"):** the twin replays the current plan
   with hidden true factors per incident kind (flood ×5, traffic ×3, closure ×12, other ×1.8; ±3% seeded noise),
   scaled by severity exactly like predictions. Base, predicted and actual timelines all come from the routing
@@ -416,7 +432,7 @@ message) after `MAX_ATTEMPTS` genuine failures (default 3) or at once for a refu
 5. On `stop.failed`: run failed-attempt verify. If genuine, offer a reattempt slot to the
    customer. After the configured number of attempts, mark it for return to origin (RTO).
 
-**As built (phase 3).** `POST /prevention/run` (console **🛡️ Check risky deliveries**, chat tool
+**As built (phase 3).** `POST /prevention/run` (console **Check risky deliveries**, chat tool
 `check_risky_deliveries`) plans first if there is no plan, scores every open order, and sends
 `confirm_request` with the planned arrival time to risky customers not yet asked (`order.risk_scored`,
 `order.confirm_requested`). Replies set `Order.customer_reply` (`order.replied`). Step 4 differs from
@@ -435,7 +451,7 @@ refusers cancel instead; no reply → driver call removes 20%). Over seeds 1–5
 | Policy | Failed deliveries | Fewer than none | Orders messaged |
 |---|---|---|---|
 | None | ~17% | – | 0% |
-| Risky only (Dispatch) | ~12% | **28% (min 25%)** | 47% |
+| Risky only (LookAtDisPatch) | ~12% | **28% (min 25%)** | 47% |
 | Everyone | ~10% | 41% | 100% |
 
 At a 25–30% message budget, the risk score gets about 19%, against 24% for an oracle that knows each
@@ -492,7 +508,7 @@ geo_confidence`
 | GET | /incidents, /policy, /health | Incidents, the current learned policy, service health |
 | POST | /incidents/{id}/triage, /resolve, /close | Re-run triage now; a human decides; end an incident (all re-plan) |
 | GET | /queue | Incidents, customer replies and failed attempts waiting for a person, with the machine's last suggestion |
-| POST | /twin/replay | Run a replay, returns a report id |
+| GET | /events | The event log as plain JSON (`after`, `types`, `limit`); /stream sends the same live |
 | POST | /prevention/run | Score delivery risk for open orders, ask risky customers to confirm |
 | POST | /orders/{id}/attempt/resolve | A person decides a failed attempt the rules couldn't settle |
 | GET | /twin/prevention | Failed deliveries under none / risk-targeted / learned / confirm-everyone, on synthetic days |
@@ -507,11 +523,14 @@ directly, so the agent and the UI see the same truth. Each tool returns a plain 
 
 ## 13. Phases and acceptance criteria
 
+**Scope (2026-10-20):** this is now a portfolio project. P4, P6 and P7 are out of scope, and so is
+P5 beyond what exists; [roadmap.md](roadmap.md) has the remaining plan.
+
 | Phase | Scope | Done when |
 |---|---|---|
-| **P1 Foundation** | Repo layout, docker-compose (Postgres + PostGIS, Redis, OSRM), migrations, event log, OSRM `RoutingEngine` with fallback to `roads.json`, OR-Tools solver (time windows, capacity), score port, API v1, React console showing the plan on the map, ADK ops chat on the API | `docker compose up` + one command starts everything; 50 orders × 5 vans planned in <5 s; v1's loop (plan → incident → re-plan → notify → learn) works through the API; v1's tests ported and passing |
-| **P2 Decision layer** | Providers `rules` and `llm` (logprobs or self-consistency), provider chains, calibration, gates, ledger, shadow mode, incident triage, several simultaneous incidents, ledger view in the console. `jev` as an optional plug-in | Every action has a ledger row; triage ≥90% kind accuracy on a 100-report labelled set with the default chain; automation and wrong-auto-action rates shown; everything works with no optional provider configured; with a TypeSafe key, `jev` runs in shadow and appears in the comparison report |
-| **P3 Failed-delivery prevention** ✅ | Delivery-risk scoring, simulated `Messenger`, reply-intent triage, reattempt/RTO state machine | On the twin, 25% fewer failed deliveries vs no prevention, same fleet. **Met: 28% mean over 5 seeds (section 10), under stated assumptions** |
+| **P1 Foundation** | Repo layout, docker-compose (Postgres + PostGIS, Redis, OSRM), migrations, event log, OSRM `RoutingEngine` with fallback to `roads.json`, OR-Tools solver (time windows, capacity), score port, API v1, React console showing the plan on the map, ADK ops chat on the API | `docker compose up` + one command starts everything; 50 orders × 5 vans planned in <5 s (**measured: 4.5 s on OSRM, 3 strategies × 1 s search; 100 × 8 in 4.4 s**); v1's loop (plan → incident → re-plan → notify → learn) works through the API; v1's tests ported and passing |
+| **P2 Decision layer** (eval built: `python -m dispatch.eval` on 30 labelled reports; live result pending quota) | Providers `rules` and `llm` (logprobs or self-consistency), provider chains, calibration, gates, ledger, shadow mode, incident triage, several simultaneous incidents, ledger view in the console. `jev` as an optional plug-in | Every action has a ledger row; triage ≥90% kind accuracy on a 100-report labelled set with the default chain; automation and wrong-auto-action rates shown; everything works with no optional provider configured; with a TypeSafe key, `jev` runs in shadow and appears in the comparison report |
+| **P3 Failed-delivery prevention** (done) | Delivery-risk scoring, simulated `Messenger`, reply-intent triage, reattempt/RTO state machine | On the twin, 25% fewer failed deliveries vs no prevention, same fleet. **Met: 28% mean over 5 seeds (section 10), under stated assumptions** |
 | **P4 Addresses** | Normalizer, geocoder chain, DIGIPIN, address-parse check, "drop a pin" flow | ≥85% automatic on a labelled set of 200 Chennai-style addresses; median error <150 m |
 | **P5 ETA + twin** | Quantile ETA model, promise policy, calibration job, replay reports, threshold tuning | ≥85% of simulated deliveries inside the promised window; reliability plots per decision type |
 | **P6 Driver + customer** | Driver app (stops, navigation hand-off, arrive/deliver/fail, GPS, photo), tracking page, failed-attempt verify, POD photo check behind a flag | A full day runs end to end on the twin with simulated drivers using the real app flows |

@@ -8,7 +8,8 @@ signal; the slowdown experienced inside each incident zone is what a real fleet 
 Three timelines per route, cumulated the same way (service time at each stop):
   base       the routing engine's legs with no incidents (a normal day)
   predicted  the plan's legs (the matrix with the policy's predicted slowdowns)
-  actual     base legs whose in-zone parts run at the TRUE slowdown
+  actual     the legs the van really drives (through its detour's via point, if the plan chose one),
+             whose in-zone parts run at the TRUE slowdown
 All three use the routing engine's matrix, so with no incidents they agree exactly.
 """
 
@@ -73,24 +74,31 @@ def simulate_day(plan: Plan, orders: dict[str, Order], depot: LatLng, start_at: 
         if not r.stops:
             continue
         pts = [depot] + [orders[s.order_id].location for s in r.stops]
-        m = engine.matrix(pts)
+        vias = [s.via for s in r.stops if s.via is not None]
+        m = engine.matrix(pts + vias)
+        via_idx = {id(v): len(pts) + n for n, v in enumerate(vias)}
         tb = tp = ta = 0.0
         prev_service = 0
         for k, s in enumerate(r.stops):
             o = orders[s.order_id]
             a, b = pts[k], pts[k + 1]
             base = m.seconds[k][k + 1]
-            actual = base
-            for inc in live:
-                share = share_inside(a, b, inc.area)
-                if not share:
-                    continue
-                w = severity_weight(inc.severity)
-                true_slow = 1 + (true_factor(inc.kind, run) - 1) * w
-                actual += base * share * (true_slow - 1)
-                zone_base[inc.kind] = zone_base.get(inc.kind, 0.0) + base * share
-                zone_actual[inc.kind] = zone_actual.get(inc.kind, 0.0) + base * share * true_slow
-                weight[inc.kind] = w
+            driven = ([(k, via_idx[id(s.via)], a, s.via), (via_idx[id(s.via)], k + 1, s.via, b)] if s.via is not None
+                      else [(k, k + 1, a, b)])
+            actual = 0.0
+            for i0, j0, p, q in driven:
+                part = m.seconds[i0][j0]
+                actual += part
+                for inc in live:
+                    share = share_inside(p, q, inc.area)
+                    if not share:
+                        continue
+                    w = severity_weight(inc.severity)
+                    true_slow = 1 + (true_factor(inc.kind, run) - 1) * w
+                    actual += part * share * (true_slow - 1)
+                    zone_base[inc.kind] = zone_base.get(inc.kind, 0.0) + part * share
+                    zone_actual[inc.kind] = zone_actual.get(inc.kind, 0.0) + part * share * true_slow
+                    weight[inc.kind] = w
             tb += prev_service + base
             tp += prev_service + s.leg_s
             ta += prev_service + actual

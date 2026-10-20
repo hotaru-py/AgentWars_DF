@@ -195,3 +195,16 @@ def test_csv_rows_with_coordinates_are_plannable(api, world):
     body = api.post("/orders/import", params={"depot_id": depot["id"]}, files={"file": ("o.csv", csv_text, "text/csv")}).json()
     states = [api.get(f"/orders/{i}").json()["state"] for i in body["created"]]
     assert states == ["geocoded", "new"]
+
+
+def test_recent_events_as_json(api, world):
+    depot, _, cust = world
+    for _ in range(3):
+        _order(api, depot, cust)
+    first = api.get("/events").json()
+    assert first and [e["seq"] for e in first] == sorted(e["seq"] for e in first)        # oldest first
+    after = first[0]["seq"]
+    later = api.get("/events", params={"after": after, "limit": 2}).json()
+    assert len(later) <= 2 and all(e["seq"] > after for e in later)
+    assert all(e["type"] == "order.created" for e in api.get("/events", params={"types": "order.created"}).json())
+    assert api.post("/twin/replay").status_code in (404, 405)                            # the stub is gone

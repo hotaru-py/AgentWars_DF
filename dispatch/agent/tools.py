@@ -6,10 +6,12 @@ agent rephrases real numbers instead of inventing them. Tools are built per app 
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from dispatch.core.models import Customer, Depot, Incident, IncidentKind, IncidentState, Order, Vehicle
+from dispatch.core.models import Customer, Depot, Incident, IncidentKind, IncidentState, Order, Vehicle, utcnow
 from dispatch.incidents import IncidentService
 from dispatch.planning import NothingToPlan, Planner
 from dispatch.prevention import PreventionService
@@ -26,6 +28,7 @@ class ToolContext:
     replies: ReplyService
     tz: str = "Asia/Kolkata"
     prevention: PreventionService | None = None
+    play: Callable[[], dict] | None = None      # starts "Play a day" (demo mode only)
 
 
 def _dur(s: float) -> str:
@@ -198,6 +201,83 @@ def make_tools(ctx: ToolContext) -> list:
         return {"status": "ok", "summary": summary.strip(),
                 "risky": [{"customer": x.customer, "chance_of_failing": round(x.risk, 2)} for x in risky]}
 
+    def delivery_problems() -> dict:
+        """Today's delivery problems: failed attempts and what happened next (trying again, going back to
+        the warehouse, or waiting for a person), deliveries customers moved to a new time, and cancellations.
+
+        Returns:
+            {"status": "ok", "summary", "failed", "rescheduled", "cancelled", "waiting"}.
+        """
+        names = {c.id: c.name for c in st.list(Customer, limit=100_000)}
+        orders = {o.id: o for o in st.list(Order, limit=100_000)}
+        who = lambda oid: names.get(orders[oid].customer_id, "a customer") if oid in orders else "a customer"  # noqa: E731
+        what = {"reattempt": "we'll try again", "rto": "going back to the warehouse",
+                "disputed": "the driver wasn't at the address, so we'll try again"}
+        failed = [f"{who(e.entity)} ({e.payload['reason'].replace('_', ' ')}): {what.get(e.payload['result'], e.payload['result'])}"
+                  for e in st.events_since(0, types=["order.attempt_checked"], limit=100_000)]
+        moved = [f"{who(e.entity)}: {_clock(datetime.fromisoformat(e.payload['window_start']))} to "
+                 f"{_clock(datetime.fromisoformat(e.payload['window_end']))}"
+                 + (" (another day)" if datetime.fromisoformat(e.payload["window_start"]).astimezone(ZoneInfo(ctx.tz)).date()
+                    != utcnow().astimezone(ZoneInfo(ctx.tz)).date() else "")
+                 for e in st.events_since(0, types=["order.rescheduled"], limit=100_000)]
+        cancelled = [who(o.id) for o in orders.values() if o.state.value == "cancelled"]
+        waiting = ([names.get(o.customer_id, "a customer") for o, _ in ctx.prevention.pending_attempts()]
+                   if ctx.prevention else [])
+        parts = []
+        if failed:
+            parts.append(f"{len(failed)} failed attempt(s): " + "; ".join(failed))
+        if waiting:
+            parts.append(f"{len(waiting)} failed attempt(s) waiting for you to check: " + ", ".join(waiting))
+        if moved:
+            parts.append(f"{len(moved)} moved to a new time: " + "; ".join(moved))
+        if cancelled:
+            parts.append(f"{len(cancelled)} cancelled: " + ", ".join(cancelled))
+        return {"status": "ok", "failed": failed, "rescheduled": moved, "cancelled": cancelled, "waiting": waiting,
+                "summary": ". ".join(parts) + "." if parts else "No delivery problems today."}
+
+    def decide_failed_delivery(customer: str, genuine: bool, reason: str = "not_home") -> dict:
+        """Decide a failed delivery that is waiting for a person, ONLY when the user says what happened.
+
+        Args:
+            customer: The customer's name as the user said it, e.g. "Karthik".
+            genuine: True if the driver really tried; False if the driver wasn't at the address.
+            reason: not_home, refused, wrong_address, unsafe or other.
+
+        Returns:
+            {"status": "ok", "summary", "result"}.
+        """
+        if ctx.prevention is None:
+            return {"status": "error", "summary": "Failed deliveries can't be decided here."}
+        key = customer.strip().lower()
+        names = {c.id: c.name for c in st.list(Customer, limit=100_000)}
+        hits = [o for o, _ in ctx.prevention.pending_attempts() if key and key in names.get(o.customer_id, "").lower()]
+        if not hits:
+            return {"status": "error", "summary": f"No failed delivery for '{customer}' is waiting for a decision."}
+        if reason not in ("not_home", "refused", "wrong_address", "unsafe", "other"):
+            reason = "other"
+        out = ctx.prevention.resolve_attempt(hits[0].id, genuine, reason, "ops chat")
+        texts = {"reattempt": "Done: we'll try again and the customer has been told.",
+                 "rto": "Done: it's going back to the warehouse and the customer has been told.",
+                 "disputed": "Done: marked as not a real attempt; we'll try again without counting it."}
+        return {"status": "ok", "result": out.result, "summary": texts.get(out.result, out.result)}
+
+    def play_a_day() -> dict:
+        """Start the demo: a fresh demo day played step by step on the map (planning, customer replies, a
+        flood, a breakdown, failed deliveries, learning). Only when the user asks to play or watch a demo day:
+        it replaces today's demo deliveries.
+
+        Returns:
+            {"status": "ok" | "error", "summary"}.
+        """
+        if ctx.play is None:
+            return {"status": "error", "summary": "Playing a demo day is only available in demo mode."}
+        try:
+            r = ctx.play()
+        except Exception as e:                      # e.g. one is already playing
+            return {"status": "error", "summary": f"Couldn't start it: {getattr(e, 'detail', e)}"}
+        return {"status": "ok", "summary": f"Started a fresh demo day with {r['steps']} steps. Watch the map and "
+                                           "the Activity tab; it takes about a minute."}
+
     def customer_messages(limit: int = 8) -> dict:
         """Recent messages to and from customers, newest first.
 
@@ -245,4 +325,5 @@ def make_tools(ctx: ToolContext) -> list:
         return {"status": "ok", "summary": "; ".join(lines) + "."}
 
     return [get_overview, plan_routes, report_problem, list_waiting, resolve_problem, run_the_day,
-            check_risky_deliveries, customer_messages, find_delivery]
+            check_risky_deliveries, delivery_problems, decide_failed_delivery, customer_messages, find_delivery,
+            play_a_day]

@@ -6,3 +6,4 @@ __pycache__/
 .adk/
 infra/osrm-data/
 dispatch_dev.db
+.eval_cache.json

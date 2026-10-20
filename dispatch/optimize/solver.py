@@ -8,10 +8,14 @@ Model:
 - Capacity: weight and volume dimensions.
 - Driver shifts: a vehicle's driver (if any) caps that vehicle's route end.
 - Vans leave at the plan start (or their driver's shift start), and waiting costs
-  params["wait_penalty"] per second, so the solver reorders stops rather than idling when it can.
-- Balance: global span cost on time, weighted by params["balance_weight"].
+  params["wait_penalty"] per second: cheap (idling before a late window isn't wasted work), but enough
+  to prefer a reorder over a long idle. Arriving before a promised time (not_before) costs more.
+- Balance: global span cost on a "work" dimension (driving + time at the door, no waiting), weighted by
+  params["balance_weight"]. Balancing clock time instead would let one late-window order (a 6 PM
+  reschedule) make that van's day long anyway, and the cheapest plan would pile everything onto it.
 - Every order can be dropped at a large penalty; dropped orders go to Plan.unassigned.
-- problem.not_before: a soft earliest arrival per order (unconfirmed risky orders go no earlier than
+- problem.not_before: a soft earliest arrival per order, costing more than waiting (arriving before the
+  customer expects risks a failed attempt). Unconfirmed risky orders go no earlier than
   the time we told the customer, which puts them later in the route; spec §10).
 - Live insertion: problem.fixed_prefix locks each vehicle's committed stops in order, and the
   previous plan seeds the search.
@@ -31,11 +35,11 @@ from dispatch.core.ports import VrpProblem
 
 COST_SCALE = 10                 # costs are integer tenths of a second
 DROP_PENALTY = 10_000_000       # >> any route cost: drop an order only if it truly can't fit
-MAX_WAIT_S = 4 * 3600
+MAX_WAIT_S = 24 * 3600         # waiting is priced by wait_penalty, so no hard cap is needed
 P90_SPREAD = 0.25
 
-DEFAULT_PARAMS = {"late_penalty": 1.0, "balance_weight": 0.5, "urgent_factor": 3.0, "early_penalty": 1.0,
-                  "wait_penalty": 0.2}
+DEFAULT_PARAMS = {"late_penalty": 1.0, "balance_weight": 0.5, "urgent_factor": 3.0, "early_penalty": 2.0,
+                  "wait_penalty": 0.2}            # cheap: idling before a late window is not wasted work
 
 
 class OrToolsSolver:
@@ -84,7 +88,8 @@ class OrToolsSolver:
         horizon = 24 * 3600
         routing.AddDimension(t_idx, MAX_WAIT_S, horizon, True, "time")
         time = routing.GetDimensionOrDie("time")
-        time.SetGlobalSpanCostCoefficient(int(round(params["balance_weight"] * COST_SCALE)))
+        routing.AddDimension(t_idx, 0, horizon, True, "work")
+        routing.GetDimensionOrDie("work").SetGlobalSpanCostCoefficient(int(round(params["balance_weight"] * COST_SCALE)))
         drivers = {d.vehicle_id: d for d in problem.drivers if d.vehicle_id}
         rel = lambda dt: int((dt - problem.start_at).total_seconds())  # noqa: E731
         time.SetSlackCostCoefficientForAllVehicles(int(round(params["wait_penalty"] * COST_SCALE)))
@@ -159,7 +164,8 @@ class OrToolsSolver:
                 p50 = problem.start_at + timedelta(seconds=arrive_s)
                 stops.append(Stop(order_id=o.id, seq=len(stops), eta_p50=p50,
                                   eta_p90=p50 + timedelta(seconds=arrive_s * P90_SPREAD), planned_arrival=p50,
-                                  leg_m=meters[prev][node], leg_s=problem.matrix.seconds[prev][node]))
+                                  leg_m=meters[prev][node], leg_s=problem.matrix.seconds[prev][node],
+                                  via=problem.matrix.detours.get(f"{prev}-{node}")))
                 dist += meters[prev][node]
                 load += o.weight_kg
                 assigned.add(o.id)

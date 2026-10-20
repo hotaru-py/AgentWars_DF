@@ -1,0 +1,30 @@
+{
+  "name": "A day in Chennai",
+  "about": "The demo day (Guindy depot, 3 vans, 10 orders) from planning to learning: a risk check, customer replies, a flood, a breakdown, failed attempts, and the replay.",
+  "steps": [
+    {"say": "Morning: planning today's routes", "do": "plan"},
+    {"say": "Before the vans leave: checking which deliveries might fail", "do": "risk_check"},
+    {"say": "Customers reply to their messages", "do": "replies", "replies": [
+      {"customer": "Divya Raman", "text": "1"},
+      {"customer": "Vignesh R", "text": "can you come after 6 pm"},
+      {"customer": "Rahul Nair", "text": "blue gate opposite the Murugan temple"},
+      {"customer": "Suresh Babu", "text": "3"}
+    ]},
+    {"say": "The vans set off", "do": "drive", "stops": 1},
+    {"say": "A flood is reported in Adyar", "do": "report", "text": "Severe waterlogging at Adyar, cars stuck near the signal"},
+    {"say": "A van breaks down: its stops move to the others", "do": "report", "text": "Tyre puncture, van can't continue", "van": "V2"},
+    {"say": "Deliveries continue", "do": "drive", "stops": 1},
+    {"say": "The remaining deliveries", "do": "drive"},
+    {"say": "End of the day: replaying it to learn how much the flood really slowed vans", "do": "run_day"}
+  ],
+  "fails": {
+    "Anitha Joseph": "customer refused to pay cash",
+    "Karthik S": "not home, phone switched off"
+  },
+  "recorded": {
+    "Severe waterlogging at Adyar, cars stuck near the signal": {"kind": "flood", "severity": 3, "credible": true},
+    "Tyre puncture, van can't continue": {"kind": "breakdown", "severity": 4, "credible": true},
+    "can you come after 6 pm": {"intent": "reschedule", "has_time": true},
+    "blue gate opposite the Murugan temple": {"intent": "give_directions", "has_time": false}
+  }
+}

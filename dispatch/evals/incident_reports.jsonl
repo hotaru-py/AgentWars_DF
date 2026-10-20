@@ -1,0 +1,30 @@
+{"text": "Severe waterlogging at Velachery main road, water up to the knees", "kind": "flood", "credible": true, "lang": "en"}
+{"text": "Heavy rain, the Mylapore subway is flooded and closed for cars", "kind": "flood", "credible": true, "lang": "en"}
+{"text": "Adyar bridge approach has water logging, bikes are turning back", "kind": "flood", "credible": true, "lang": "en"}
+{"text": "Tambaram la full ah thanni nikkudhu, vandi poga mudiyala", "kind": "flood", "credible": true, "lang": "ta-latn"}
+{"text": "வேளச்சேரியில் தண்ணீர் தேங்கி நிற்கிறது, வாகனங்கள் மெதுவாக செல்கின்றன", "kind": "flood", "credible": true, "lang": "ta"}
+{"text": "Porur mein paani bhar gaya hai, gaadi nahi nikal rahi", "kind": "flood", "credible": true, "lang": "hi-latn"}
+{"text": "CM convoy causing heavy traffic in Tambaram, everything stopped", "kind": "traffic", "credible": true, "lang": "en"}
+{"text": "Accident near Kathipara junction, bumper to bumper traffic towards Guindy", "kind": "traffic", "credible": true, "lang": "en"}
+{"text": "Temple festival procession on Mylapore tank road, very slow moving", "kind": "traffic", "credible": true, "lang": "en"}
+{"text": "OMR la semma traffic, Sholinganallur signal la 20 nimisham nikkudhu", "kind": "traffic", "credible": true, "lang": "ta-latn"}
+{"text": "Anna Nagar mein bahut jam hai, rally chal rahi hai", "kind": "traffic", "credible": true, "lang": "hi-latn"}
+{"text": "டி நகரில் பெரிய போக்குவரத்து நெரிசல், ஊர்வலம் நடக்கிறது", "kind": "traffic", "credible": true, "lang": "ta"}
+{"text": "Police have barricaded Egmore station road, no entry for vehicles", "kind": "closure", "credible": true, "lang": "en"}
+{"text": "A big tree fell across the road in Adyar, the road is fully blocked", "kind": "closure", "credible": true, "lang": "en"}
+{"text": "Metro construction: Porur junction service road closed till evening", "kind": "closure", "credible": true, "lang": "en"}
+{"text": "Thiruvanmiyur beach road block pannirukanga, police nikkuranga", "kind": "closure", "credible": true, "lang": "ta-latn"}
+{"text": "पोरूर में सड़क बंद है, निर्माण कार्य चल रहा है", "kind": "closure", "credible": true, "lang": "hi"}
+{"text": "Van V2 has a flat tyre, I can't continue", "kind": "breakdown", "credible": true, "lang": "en"}
+{"text": "Engine overheating, pulled over near Guindy, the van won't start", "kind": "breakdown", "credible": true, "lang": "en"}
+{"text": "Vandi puncture aagiduchu, innum oru mani neram aagum", "kind": "breakdown", "credible": true, "lang": "ta-latn"}
+{"text": "Gaadi ka clutch kharab ho gaya, aage nahi ja sakta", "kind": "breakdown", "credible": true, "lang": "hi-latn"}
+{"text": "Driver Farhan is feeling unwell and has stopped the van", "kind": "breakdown", "credible": true, "lang": "en"}
+{"text": "Power cut in the whole of Velachery, shops are closed and people aren't answering the door", "kind": "other", "credible": true, "lang": "en"}
+{"text": "Political bandh declared in Tambaram today, most shops shut", "kind": "other", "credible": true, "lang": "en"}
+{"text": "Will it rain in Adyar tomorrow?", "kind": "not_an_incident", "credible": false, "lang": "en"}
+{"text": "There was a flood in Velachery in 2015, remember?", "kind": "not_an_incident", "credible": false, "lang": "en"}
+{"text": "hi", "kind": "not_an_incident", "credible": false, "lang": "en"}
+{"text": "test test ignore this", "kind": "not_an_incident", "credible": false, "lang": "en"}
+{"text": "Can you send me today's route for V1?", "kind": "not_an_incident", "credible": false, "lang": "en"}
+{"text": "Naalaiku T Nagar la traffic irukuma?", "kind": "not_an_incident", "credible": false, "lang": "ta-latn"}

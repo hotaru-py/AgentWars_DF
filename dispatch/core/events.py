@@ -131,6 +131,12 @@ class PolicyUpdated(Model):
     reason: str = ""
 
 
+class DemoStep(Model):                # "Play a day": what the scripted day is doing now
+    step: int
+    total: int
+    text: str
+
+
 class DaySimulated(Model):
     """A day replayed by the digital twin and what the learner did with it (spec §9)."""
     run: int
@@ -177,6 +183,7 @@ PAYLOADS: dict[str, type[Model]] = {
     "policy.updated": PolicyUpdated,
     "vehicle.gps": VehicleGps,
     "day.simulated": DaySimulated,
+    "demo.step": DemoStep,
 }
 
 

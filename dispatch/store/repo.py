@@ -424,6 +424,11 @@ class Store:
         with self.engine.connect() as c:
             return [Policy.model_validate(d) for d in c.execute(sa.select(S.policies.c.doc).order_by(S.policies.c.version)).scalars()]
 
+    def append_event(self, event_type: str, entity: str, payload: Model) -> int:
+        """A plain event with no state change (e.g. demo.step narration)."""
+        with self.tx() as c:
+            return self._append(c, make_event(event_type, entity, payload))
+
     def record_day(self, report) -> int:
         """Append a day.simulated event (the twin's report)."""
         with self.tx() as c:

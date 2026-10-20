@@ -32,7 +32,8 @@ def retime(plan: Plan, problem: VrpProblem) -> Plan:
                 t = max(t, (o.window_start - start).total_seconds())
             p50 = start + timedelta(seconds=t)
             stops.append(Stop(order_id=o.id, seq=len(stops), eta_p50=p50, eta_p90=p50 + timedelta(seconds=t * P90_SPREAD),
-                              planned_arrival=s.planned_arrival, leg_m=meters[prev][k], leg_s=secs[prev][k]))
+                              planned_arrival=s.planned_arrival, leg_m=meters[prev][k], leg_s=secs[prev][k],
+                              via=problem.matrix.detours.get(f"{prev}-{k}")))
             dist += meters[prev][k]
             load += o.weight_kg
             covered.add(o.id)

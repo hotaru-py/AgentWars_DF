@@ -121,3 +121,33 @@ def test_chat_rejects_bad_session_ids(ctx):
     app = create_app(ctx.store, planner=ctx.planner, settings=Settings(), chat_runner_factory=FakeRunner)
     with TestClient(app) as c:
         assert c.post("/chat", json={"session_id": "../etc", "text": "hi"}).status_code == 422
+
+
+def test_delivery_problem_tools(ctx, monkeypatch):
+    from dispatch.core.events import StopEvent
+    from dispatch.core.models import Customer, Order
+    from dispatch.prevention import PreventionService
+    st = ctx.store
+    prevention = PreventionService(st, ctx.incidents.engine, ctx.planner, None, Settings())
+    full = ToolContext(st, ctx.planner, ctx.incidents, ctx.replies, prevention=prevention,
+                       play=lambda: {"started": True, "steps": 9})
+    t = _tools(full)
+    assert t["delivery_problems"]()["summary"] == "No delivery problems today."
+    ctx.planner.run(st.list(Order)[0].depot_id, "start")
+    names = {c.id: c.name for c in st.list(Customer)}
+    plan = st.current_plan(st.list(Order)[0].depot_id)
+    van = {s.order_id: r.vehicle_id for r in plan.routes for s in r.stops}
+    karthik = next(o for o in st.list(Order) if names[o.customer_id] == "Karthik S")
+    monkeypatch.setattr(prevention, "_evidence", lambda order, ev: (200.0, 30.0))   # unclear: waits for a person
+    ev = StopEvent(order_id=karthik.id, vehicle_id=van[karthik.id], reason="nobody home")
+    st.stop_event("stop.failed", ev)
+    assert run(prevention.check_attempt(karthik.id, ev)).result == "human"
+    p = t["delivery_problems"]()
+    assert p["waiting"] == ["Karthik S"] and "waiting for you to check" in p["summary"]
+    assert t["decide_failed_delivery"]("nobody", True)["status"] == "error"
+    d = t["decide_failed_delivery"]("karthik", True, "not_home")
+    assert d["result"] == "reattempt" and "try again" in d["summary"]
+    p = t["delivery_problems"]()
+    assert p["waiting"] == [] and p["failed"] == ["Karthik S (not home): we'll try again"]
+    assert t["play_a_day"]()["status"] == "ok"
+    assert _tools(ctx)["play_a_day"]()["status"] == "error"                   # not in demo mode

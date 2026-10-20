@@ -1,13 +1,11 @@
 """Ports: the interfaces between tracks (spec §6.1). Implementations live in their track's package
 and must pass tests/contracts/. Changing a signature here changes the contract: update the spec too.
 
-    RoutingEngine  dispatch/routing/   (osrm, cached roads.json, haversine)
+    RoutingEngine  dispatch/routing/   (osrm, haversine, fallback)
     Solver         dispatch/optimize/  (OR-Tools)
     Decider        dispatch/decide/    (rules, ml, llm; optional jev or plug-ins)
-    Messenger      dispatch/messaging/ (sim, whatsapp, sms)
-    SignalSource   dispatch/signals/   (sim, weather, traffic)
-    Geocoder       dispatch/address/
-    EtaModel       dispatch/eta/
+    Messenger      dispatch/messaging/ (sim)
+    SignalSource, Geocoder, EtaModel   contracts only: their phases are out of scope (specs/roadmap.md)
 """
 
 from __future__ import annotations
@@ -28,6 +26,7 @@ class Matrix(Model):
     seconds: list[list[float]]
     meters: list[list[float]]
     source: str = ""                   # "osrm", "cached", "haversine"
+    detours: dict[str, LatLng] = {}    # "i-j" -> via point: going around an incident beat going through
 
     def size(self) -> int:
         return len(self.points)

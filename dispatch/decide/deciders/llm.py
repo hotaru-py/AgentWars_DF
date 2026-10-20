@@ -47,6 +47,12 @@ def describe(qid: str, q: Question) -> str:
     return f"- {qid}: Is this true? \"{q.instructions}\" Answer yes or no."
 
 
+def _transient(e: Exception) -> bool:
+    """429 (quota) and 5xx (overload, outage) errors: retry later, don't change methods."""
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    return code in (429, 500, 502, 503, 504) or any(m in str(e) for m in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"))
+
+
 def to_answer(q: Question, dist: dict[str, float]) -> Answer:
     if q.type == "choice":
         return ChoiceAnswer.from_probabilities(dist)
@@ -153,6 +159,8 @@ class LlmDecider:
             except ProviderUnavailable:
                 raise
             except Exception as e:                  # endpoint/model without logprobs: remember and sample
+                if _transient(e):                   # quota or overload says nothing about logprobs support
+                    raise
                 if self.method == "logprobs":
                     raise ProviderUnavailable(f"logprobs unavailable: {e}") from e
                 self._logprobs_ok = False

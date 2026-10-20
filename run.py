@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start Dispatch v2 on any OS: the API (port 8080) and the console (port 8001).
+"""Start LookAtDisPatch on any OS: the API (port 8080) and the console (port 8001).
 
     python run.py              start everything and open the console in your browser
     python run.py --fresh      wipe the database and load a fresh demo day first
@@ -218,7 +218,7 @@ def wait_api(seconds: float = 60) -> bool:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Start Dispatch v2 (API + console).")
+    ap = argparse.ArgumentParser(description="Start LookAtDisPatch (API + console).")
     ap.add_argument("--fresh", action="store_true", help="wipe the database and load a fresh demo day")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser tab")
     ap.add_argument("--no-docker", action="store_true", help="don't start Docker services")
@@ -280,7 +280,7 @@ def main() -> int:
             print("The API did not start. See the log above.")
             return 1
         url = f"http://127.0.0.1:{UI_PORT}/console.html?api=http://127.0.0.1:{API_PORT}"
-        print(f"\nDispatch console: {url}\nAPI docs:         http://127.0.0.1:{API_PORT}/docs\nCtrl+C to stop.\n", flush=True)
+        print(f"\nLookAtDisPatch: {url}\nAPI docs:       http://127.0.0.1:{API_PORT}/docs\nCtrl+C to stop.\n", flush=True)
         if not args.no_open:
             webbrowser.open(url)
         while True:

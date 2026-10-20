@@ -68,7 +68,7 @@ class Planner:
             raise NothingToPlan(f"depot {depot_id} has no plannable orders with a location")
         matrix = self.engine.matrix([depot.location] + [o.location for o in orders])
         incidents = self.store.list(Incident, state=IncidentState.active.value)
-        matrix = apply_incidents(matrix, incidents)
+        matrix = apply_incidents(matrix, incidents, self.engine)
         not_before = {o.id: o.promised_at for o in orders if awaiting_reply(o) and o.promised_at}
         return VrpProblem(depot_id=depot_id, depot=depot.location, start_at=max(utcnow(), depot.opens_at),
                           orders=orders, vehicles=vehicles, drivers=drivers, matrix=matrix,
@@ -119,6 +119,9 @@ class Planner:
             if not r.stops:
                 continue
             try:
-                r.geometry = self.engine.route([problem.depot] + [loc[s.order_id] for s in r.stops]).geometry
+                pts = [problem.depot]
+                for s in r.stops:                       # detour legs go through their via point
+                    pts += ([s.via] if s.via else []) + [loc[s.order_id]]
+                r.geometry = self.engine.route(pts).geometry
             except RoutingUnavailable:
                 r.geometry = []                 # the map falls back to straight lines between stops
